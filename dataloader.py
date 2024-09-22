@@ -20,6 +20,7 @@ class MyDataset(Dataset):
         self.dim_feature = 2048
         filepath = os.path.join(self.data_path, phase)
         self.files_list = self.get_filelist(filepath)
+        print(f"Dataset for {phase} initialized!")
         # print(self.files_list)
 
     def __len__(self):
@@ -62,7 +63,7 @@ if __name__ == '__main__':
     from tqdm import tqdm
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, default='./feat_extract/feature/rgb_flow_half',
+    parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature',
                         help='The relative path of dataset.')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 10')

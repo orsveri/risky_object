@@ -88,7 +88,7 @@ def test_all(testdata_loader, model):
     losses_all = []
 
     with torch.no_grad():
-        for i, (batch_xs, batch_det, batch_toas, batch_flow) in enumerate(testdata_loader):
+        for batch_xs, batch_det, batch_toas, batch_flow in tqdm(testdata_loader):
             losses, all_outputs, labels = model(batch_xs, batch_det, batch_toas, batch_flow)
 
             losses_all.append(losses)
@@ -101,9 +101,7 @@ def test_all(testdata_loader, model):
                         score = np.exp(frame[j][:, 1])/np.sum(np.exp(frame[j]), axis=1)
                         all_pred.append(score)
                         all_labels.append(labels[t][j]+0)  # added zero to convert array to scalar
-
     # all_pred = np.array([all_pred[i][0] for i in range(len(all_pred))])
-
     return losses_all, all_pred, all_labels
 
 
@@ -116,6 +114,8 @@ def average_losses(losses_all):
 
 
 def sanity_check():
+    print("==== SANITY CHECK ====")
+
     # data_path = os.path.join(ROOT_PATH, p.data_path, p.dataset)
     data_path = p.data_path
     model_dir = os.path.join(p.output_dir, 'snapshot')
@@ -129,6 +129,8 @@ def sanity_check():
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
+    print("Creating datasets...")
+
     train_data = MyDataset(data_path, 'train', toTensor=True, device=device)
     test_data = MyDataset(data_path, 'val', toTensor=True, device=device)
 
@@ -140,10 +142,14 @@ def sanity_check():
     n_frames = 100
     fps = 20
 
+    print("Datasets and dataloader created")
+
     model = RiskyObject(p.x_dim, p.h_dim, n_frames, fps)
     # pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # print('pytorch_total_params : ', pytorch_total_params)
     # sys.exit()
+
+    print("Model created")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=p.base_lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -257,9 +263,6 @@ def train_eval():
     #     if param.requires_grad:
     #         print(name)
 
-
-
-
     for k in range(p.epoch):
         loop = tqdm(enumerate(traindata_loader), total=len(traindata_loader))
         if k <= start_epoch:
@@ -308,7 +311,7 @@ def train_eval():
 
         model.train()
 
-        # write_pr_curve_tensorboard(logger, all_pred, all_labels)
+        write_pr_curve_tensorboard(logger, all_pred, all_labels)
         model_file = os.path.join(model_dir, 'model_%02d.pth' % (k))
 
         torch.save({'epoch': k,
@@ -316,23 +319,28 @@ def train_eval():
                     'optimizer': optimizer.state_dict()}, model_file)
 
         ##########################################################################
-        # save model
-        if roc_auc > auc_max:
-            auc_max = roc_auc
-            # model_file = os.path.join(model_dir, 'best_auc_%02d.pth' % (k))
-            model_file = os.path.join(model_dir, 'best_auc.pth')
-            torch.save({'epoch': k,
-                        'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict()}, model_file)
-            print('Best AUC Model has been saved as: %s' % (model_file))
-        elif ap > ap_max:
-            ap_max = ap
-            # model_file = os.path.join(model_dir, 'best_ap_%02d.pth' % (k))
-            model_file = os.path.join(model_dir, 'best_ap.pth')
-            torch.save({'epoch': k,
-                        'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict()}, model_file)
-            print('Best AP Model has been saved as: %s' % (model_file))
+        model_file = os.path.join(model_dir, f'ckpt{k}_auc{roc_auc:.2f}_ap{ap:.2f}.pth')
+        torch.save({'epoch': k,
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict()}, model_file)
+        print('the model has been saved as: %s' % (model_file))
+        # # save model
+        # if roc_auc > auc_max:
+        #     auc_max = roc_auc
+        #     model_file = os.path.join(model_dir, 'best_auc_%02d.pth' % (k))
+        #     #model_file = os.path.join(model_dir, 'best_auc.pth')
+        #     torch.save({'epoch': k,
+        #                 'model': model.state_dict(),
+        #                 'optimizer': optimizer.state_dict()}, model_file)
+        #     print('Best AUC Model has been saved as: %s' % (model_file))
+        # elif ap > ap_max:
+        #     ap_max = ap
+        #     model_file = os.path.join(model_dir, 'best_ap_%02d.pth' % (k))
+        #     # model_file = os.path.join(model_dir, 'best_ap.pth')
+        #     torch.save({'epoch': k,
+        #                 'model': model.state_dict(),
+        #                 'optimizer': optimizer.state_dict()}, model_file)
+        #     print('Best AP Model has been saved as: %s' % (model_file))
         ###########################################################################
         scheduler.step(losses['cross_entropy'])
         # write histograms
@@ -392,13 +400,13 @@ def test_eval():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, default='./feat_extract/feature/rgb_flow_1000',
+    parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/',
                         help='The relative path of dataset.')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 1')
     parser.add_argument('--base_lr', type=float, default=1e-3,
                         help='The base learning rate. Default: 1e-3')
-    parser.add_argument('--epoch', type=int, default=22,
+    parser.add_argument('--epoch', type=int, default=30,
                         help='The number of training epoches. Default: 30')
     parser.add_argument('--h_dim', type=int, default=256,
                         help='hidden dimension of the gru. Default: 256')
@@ -410,7 +418,7 @@ if __name__ == '__main__':
                         help='The relative path of dataset.')
     parser.add_argument('--test_iter', type=int, default=1,
                         help='The number of epochs to perform a evaluation process. Default: 64')
-    parser.add_argument('--ckpt_file', type=str, default='checkpoints/archive_March_6_23/snapshot_ablation_10/best_auc.pth',
+    parser.add_argument('--ckpt_file', type=str, default='checkpoints/pretrained/best_auc.pth',
                         help='model file')
     parser.add_argument('--resume', action='store_true',
                         help='If to resume the training. Default: False')

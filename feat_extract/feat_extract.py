@@ -81,7 +81,6 @@ def main():
     csv_files = csv_files[1:]
 
 
-
     # print(csv_files)
     scaling_w = 4.82  # 1080/224
     scaling_h = 3.21  # 720/224

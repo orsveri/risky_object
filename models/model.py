@@ -145,9 +145,10 @@ class RiskyObject(nn.Module):
 
     def forward(self, x, y, toa, flow, hidden_in=None, testing=False):
         """
-        :param x (batchsize, nFrames, 1+maxBox, Xdim)
-        :param y (batchsize, nFrames, maxBox, 6)
-        :toa (batchsize, 1)
+        :param x (batchsize, nFrames, 1+maxBox, Xdim) (RGB appearance feats - not really used)
+        :param y (batchsize, nFrames, maxBox, 6) (detections)
+        :param toa (batchsize, 1) (time of accident? number of frame)
+        :param flow (batchsize, nFrames, 1+maxBox, Xdim) (Flow appearance feats)
         :batchsize = 1, currently we support batchsize=1
         """
         losses = {'cross_entropy': 0}
@@ -193,6 +194,7 @@ class RiskyObject(nn.Module):
                         # decoding the coordinate with a secondary GRU model
                         unnormalized_cor = y[0][t][bbox]  # unnormalized coordinate (1080,720)scale
                         # print(d[1]/1080)
+                        # TODO: !!!
                         norm_cor = torch.Tensor([unnormalized_cor[1]/1080, unnormalized_cor[2]/720, unnormalized_cor[3] /
                                                  1080, unnormalized_cor[4]/720])  # normalized coordinate
 
