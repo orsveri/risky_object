@@ -100,6 +100,8 @@ def main():
         rgb_zip = os.path.join(clip_folder, "rgb.zip")
         flow_zip = os.path.join(clip_folder, "flow.zip")
         out_file = os.path.join(clip_folder, f"{os.path.basename(clip_folder)}.npz")
+        if os.path.exists(out_file):
+            os.remove(out_file)
         frames = natsorted(dets["frame"].unique())
         N = len(frames) - 1
         # N frames, 30 maximum objects, 6: 1-> track_id, (2,3,4,5)-> (y1,x1;y2,x2), 6-> object serial number in each frame
@@ -114,14 +116,14 @@ def main():
 
         for i, frame in enumerate(frames):
             frame_dets = dets[dets["frame"] == frame]
-            frame_dets = frame_dets[["track_id", "xmin", "ymin", "xmax", "ymax", "label"]].to_numpy()
+            frame_dets = frame_dets[["track_id", "x1", "y1", "x2", "y2", "label"]].to_numpy()
             frame_dets = np.pad(frame_dets, ((0, 30-frame_dets.shape[0]), (0, 0)), mode='constant', constant_values=0)
             detections[i] = frame_dets
         # RGB frames
         with zipfile.ZipFile(rgb_zip, 'r') as z:
             for j, frame in enumerate(frames):
                 image = None
-                image_file = f"{str(frame).zfill(6)}.jpg"
+                image_file = f"rgb_{str(frame).zfill(8)}.jpg"
                 with z.open(image_file) as f:
                     image = Image.open(io.BytesIO(f.read()))
                 w_, h_ = image.size
@@ -148,7 +150,7 @@ def main():
         with zipfile.ZipFile(flow_zip, 'r') as z:
             for k, frame in enumerate(frames):
                 image = None
-                image_file = f"{str(frame).zfill(6)}.png"
+                image_file = f"rgb_{str(frame).zfill(8)}.png"
                 with z.open(image_file) as f:
                     image = Image.open(io.BytesIO(f.read()))
                 w_, h_ = image.size
