@@ -175,10 +175,10 @@ def main():
         # print('frame_level feature extraction finished.')
 
         # Resize bboxes so it aligns with the processing later
-        detections[1] *= 1080
-        detections[2] *= 720
-        detections[3] *= 1080
-        detections[4] *= 720
+        detections[:, :, 1] *= 1080
+        detections[:, :, 2] *= 720
+        detections[:, :, 3] *= 1080
+        detections[:, :, 4] *= 720
         #
         np.savez_compressed(
             out_file,

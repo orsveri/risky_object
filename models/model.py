@@ -12,6 +12,18 @@ import numpy as np
 import sys
 
 
+def masked_attention(Q, K, V, mask=None):
+    # Scaled dot-product attention
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(Q.size(-1))
+
+    if mask is not None:
+        # Mask out padded positions by assigning them a very large negative value
+        scores = scores.masked_fill(mask == 0, -1e9)
+
+    attention_weights = F.softmax(scores, dim=-1)
+    return torch.matmul(attention_weights, V)
+
+
 class GRUNet(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, n_layers, output_cor_dim):
         super(GRUNet, self).__init__()
@@ -161,8 +173,6 @@ class RiskyObject(nn.Module):
         # hidden representation for secondary gru
         h_all_in_cor = {}
         h_all_out_cor = {}
-        # h_all_in_flow = {}
-        # h_all_out_flow = {}
 
         all_outputs = []
         all_labels = []
@@ -180,16 +190,15 @@ class RiskyObject(nn.Module):
 
             h_all_out = {}
             h_all_out_cor = {}
-            h_all_out_flow = {}
             frame_outputs = []
             frame_labels = []
+
             for bbox in range(30):
                 if y[0][t][bbox][0] == 0:  # ignore if there is no bounding box
                     continue
                 else:
-                    track_id = str(y[0][t][bbox][0].cpu().detach().numpy())
+                    track_id = str(int(y[0][t][bbox][0].cpu().detach().numpy()))
                     if track_id in h_all_in:
-
                         # secondary GRU-----------------------------------
                         # decoding the coordinate with a secondary GRU model
                         unnormalized_cor = y[0][t][bbox]  # unnormalized coordinate (1080,720)scale
@@ -213,7 +222,7 @@ class RiskyObject(nn.Module):
 
                         x_obj = x_t[0][bbox]  # 4096 # x_t[batch][frame][bbox]
                         x_obj = torch.unsqueeze(x_obj, 0)  # 1 x 512
-                        x_obj = torch.unsqueeze(x_obj, 0)  # 1 x 1 x 512
+                        x_obj = torch.unsqueeze(x_obj, 0)  # 1 x 1 x 512 // B, L, C
 
                         output, h_out = self.gru_net(
                             x_obj, h_in, output_cor)  # 1x1x256
@@ -266,6 +275,8 @@ class RiskyObject(nn.Module):
 
             all_outputs.append(frame_outputs)
             all_labels.append(frame_labels)
+
+            #
             h_all_in = {}
             h_all_in = h_all_out.copy()
 

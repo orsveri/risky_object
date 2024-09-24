@@ -6,17 +6,83 @@ import os
 import numpy as np
 import pickle
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler, ConcatDataset
+
+
+class ConcatBatchSampler(Sampler):
+    def __init__(self, dataset, batch_size, dataset_sizes, shuffle=True):
+        """
+        Args:
+            dataset (ConcatDataset): The concatenated dataset.
+            batch_size (int): Number of samples per batch.
+            dataset_sizes (list): A list containing the sizes of each dataset in the ConcatDataset.
+            shuffle (bool): Whether to shuffle the indices within each dataset.
+        """
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.dataset_sizes = dataset_sizes
+        self.shuffle = shuffle
+
+        # Create lists of indices for each dataset
+        self.indices_a = list(range(self.dataset_sizes[0]))  # Indices for Dataset A
+        self.indices_b = list(range(self.dataset_sizes[0], sum(self.dataset_sizes)))  # Indices for Dataset B
+
+    def __iter__(self):
+        # Optionally shuffle the indices within each dataset
+        if self.shuffle:
+            torch.manual_seed(torch.initial_seed())
+            self.indices_a = torch.randperm(self.dataset_sizes[0]).tolist()
+            self.indices_b = torch.randperm(self.dataset_sizes[1]).add(self.dataset_sizes[0]).tolist()
+
+        # Split indices into batches for Dataset A and Dataset B
+        batches_a = [self.indices_a[i:i + self.batch_size] for i in range(0, len(self.indices_a), self.batch_size)]
+        batches_b = [self.indices_b[i:i + self.batch_size] for i in range(0, len(self.indices_b), self.batch_size)]
+
+        if len(batches_a) > len(batches_b):
+            na = round(len(batches_a) / len(batches_b))
+            nb = 1
+        else:
+            na = 1
+            nb = round(len(batches_b) / len(batches_a))
+
+        # Interleave batches from both datasets (or alternate in some way)
+        combined_batches = []
+        while len(batches_a) and len(batches_b):
+            _a_batches = batches_a[:na]
+            _b_batches = batches_b[:nb]
+            combined_batches.extend(_a_batches)
+            combined_batches.append(_b_batches)
+            batches_a = batches_a[na:]
+            batches_b = batches_b[nb:]
+
+        # Handle if one dataset has more batches than the other
+        if len(batches_a) > 0:
+            combined_batches.extend(batches_a)
+        elif len(batches_b) > 0:
+            combined_batches.extend(batches_b)
+
+        # Return iterator over combined batches
+        return iter(combined_batches)
+
+    def __len__(self):
+        # Total number of batches, considering both datasets
+        num_batches_a = len(self.indices_a) // self.batch_size
+        num_batches_b = len(self.indices_b) // self.batch_size
+        return num_batches_a + num_batches_b
 
 
 class MyDataset(Dataset):
-    def __init__(self, data_path, phase, toTensor=False,  device=torch.device('cuda')):
+    def __init__(self, data_path, phase, data_fps, target_fps, toTensor=False,  device=torch.device('cuda')):
         self.data_path = data_path
         self.phase = phase
         self.toTensor = toTensor
         self.device = device
         self.n_frames = 100  # -->
         self.fps = 20
+        self.data_fps = data_fps
+        self.target_fps = target_fps
+        assert data_fps % target_fps == 0, "Cannot use the given target fps!"
+        self.fps_step = int(data_fps // target_fps)
         self.dim_feature = 2048
         filepath = os.path.join(self.data_path, phase)
         self.files_list = self.get_filelist(filepath)
@@ -25,7 +91,8 @@ class MyDataset(Dataset):
 
     def __len__(self):
         data_len = len(self.files_list)
-        return data_len
+        #return data_len
+        return 10
 
     def get_filelist(self, filepath):
         assert os.path.exists(filepath), "Directory does not exist: %s" % (filepath)
@@ -44,9 +111,16 @@ class MyDataset(Dataset):
             detection = data['detection']  # labels : data['detection'][:,:,5] --> 100 x 30
             flow = data['flow_feat']  # 100 x 31 x 2048
             # track_id : data['detection'][:,:,0] --> 100 x 30
-
         except:
             raise IOError('Load data error! File: %s' % (data_file))
+
+        N = features.shape[0]
+        if self.fps_step != 1:
+            start = (N - 1) % self.fps_step
+            features = features[start::self.fps_step]
+            detection = detection[start::self.fps_step]
+            flow = flow[start::self.fps_step]
+            toa = [toa[0] / self.fps_step]
 
         if self.toTensor:
             features = torch.Tensor(features).to(self.device)  # 50 x 20 x 4096
@@ -73,8 +147,8 @@ if __name__ == '__main__':
     data_path = p.data_path
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    train_data = MyDataset(data_path, 'train', toTensor=True, device=device)
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device)
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=20, target_fps=20)
+    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=20, target_fps=20)
 
     traindata_loader = DataLoader(
         dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True)

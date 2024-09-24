@@ -44,6 +44,8 @@ def get_args():
     parser = argparse.ArgumentParser()
     # path to a dataset folder, containing subfolders with clips
     parser.add_argument("--path")
+    parser.add_argument("--start")
+    parser.add_argument("--stop")
     args = parser.parse_args()
     return args
 
@@ -89,6 +91,11 @@ def main():
     clip_folders = natsorted(os.listdir(dataset_path))
     clip_folders = [os.path.join(dataset_path, cf) for cf in clip_folders if os.path.isdir(os.path.join(dataset_path, cf))]
 
+    if not args.stop:
+        clip_folders = clip_folders[int(args.start):]
+    else:
+        clip_folders = clip_folders[int(args.start):int(args.stop)]
+
     scaling_w_rgb = 3.17  # 710/224
     scaling_w_flow = 3.18
     scaling_h_rgb = scaling_h_flow = 1.79  # 400/224
@@ -97,14 +104,21 @@ def main():
     extractor = FeatureExtractor().to(device=device)
     extractor.eval()
 
+    no_dets = []
+
     for clip_folder in tqdm(clip_folders):
         # All files
         dets = pd.read_csv(os.path.join(clip_folder, "detections.csv"))
         rgb_zip = os.path.join(clip_folder, "rgb.zip")
         flow_zip = os.path.join(clip_folder, "flow.zip")
         out_file = os.path.join(clip_folder, f"{os.path.basename(clip_folder)}.npz")
+        if os.path.exists(out_file):
+            os.remove(out_file)
         frames = natsorted(dets["frame"].unique())
         N = len(frames) - 1
+        if N < 1:
+            no_dets.append(clip_folder)
+            continue
         # N frames, 30 maximum objects, 6: 1-> track_id, (2,3,4,5)-> (y1,x1;y2,x2), 6-> object serial number in each frame
         detections = np.zeros((N, 30, 6), dtype=np.float32)
         # 100 frames, 1 global frame-level feature + 30 object level feature , resnet50 feat dimension 2048
@@ -178,10 +192,10 @@ def main():
         # print('frame_level feature extraction finished.')
 
         # Resize bboxes so it aligns with the processing later
-        detections[1] *= 1080
-        detections[2] *= 720
-        detections[3] *= 1080
-        detections[4] *= 720
+        detections[:, :, 1] *= 1080
+        detections[:, :, 2] *= 720
+        detections[:, :, 3] *= 1080
+        detections[:, :, 4] *= 720
         #
         np.savez_compressed(
             out_file,
@@ -193,7 +207,13 @@ def main():
         )
         count +=1
 
+    print(no_dets)
+
 if __name__ == '__main__':
     main()
 
-# --path /mnt/experiments/sorlova/datasets/GTACrash/dataset
+# --path /mnt/experiments/sorlova/datasets/GTACrash/dataset --start 0 --stop -1
+# export CUDA_VISIBLE_DEVICES=1 && cd repos/TADTAA/risky_object/feat_extract/ && conda activate gg
+# python feat_extract_my_gta.py --path /mnt/experiments/sorlova/datasets/GTACrash/dataset --start 0 --stop 1500
+
+

@@ -13,7 +13,8 @@ from dataloader import MyDataset
 import argparse
 from tqdm import tqdm
 import os
-from tensorboardX import SummaryWriter
+import shutil
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import csv
 # os.environ['CUDA_VISIBLE_DEVICES'] = '7'
@@ -32,17 +33,17 @@ def write_scalars(logger, epoch, losses, lr):
     # fetch results
     cross_entropy = losses['cross_entropy'].mean()
     # write to tensorboardX
-    logger.add_scalars('train/loss', {'Loss': cross_entropy}, epoch)
-    logger.add_scalars("train/lr", {'lr': lr}, epoch)
+    logger.add_scalar('train/loss', cross_entropy, epoch)
+    logger.add_scalar("train/lr", lr, epoch)
 
 
 def write_test_scalars(logger, epoch, losses, roc_auc, ap):
     cross_entropy = losses.mean()
-    logger.add_scalars('test/loss', {'Loss': cross_entropy}, epoch)
-    logger.add_scalars('test/roc_auc', {'roc_auc': roc_auc}, epoch)
-    logger.add_scalars('test/ap', {'ap': ap}, epoch)
-    # logger.add_scalars('test/fpr', {'fpr': fpr}, epoch)
-    # logger.add_scalars('test/fpr', {'tpr': tpr}, epoch)
+    logger.add_scalar('test/loss', cross_entropy, epoch)
+    logger.add_scalar('test/roc_auc', roc_auc, epoch)
+    logger.add_scalar('test/ap', ap, epoch)
+    # logger.add_scalar('test/fpr', fpr, epoch)
+    # logger.add_scalar('test/fpr', tpr, epoch)
 
 
 def write_pr_curve_tensorboard(logger, test_probs, test_label):
@@ -92,7 +93,8 @@ def test_all(testdata_loader, model):
             losses, all_outputs, labels = model(batch_xs, batch_det, batch_toas, batch_flow)
 
             losses_all.append(losses)
-            for t in range(100):
+            T = len(all_outputs)
+            for t in range(T):
                 frame = all_outputs[t]
                 if len(frame) == 0:
                     continue
@@ -131,8 +133,8 @@ def sanity_check():
 
     print("Creating datasets...")
 
-    train_data = MyDataset(data_path, 'train', toTensor=True, device=device)
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device)
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=20, target_fps=20)
+    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=20, target_fps=20)
 
     traindata_loader = DataLoader(
         dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True)
@@ -178,7 +180,7 @@ def train_eval():
 
     # data_path = os.path.join(ROOT_PATH, p.data_path, p.dataset)
     data_path = p.data_path
-    model_dir = os.path.join(p.output_dir, 'snapshot_ablation_10')
+    model_dir = os.path.join(p.output_dir, 'ckpts')
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
     logs_dir = os.path.join(p.output_dir, 'logs')
@@ -200,8 +202,8 @@ def train_eval():
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    train_data = MyDataset(data_path, 'train', toTensor=True, device=device)
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device)
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)
+    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)
 
     traindata_loader = DataLoader(
         dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True)
@@ -209,16 +211,18 @@ def train_eval():
                                  shuffle=False, drop_last=True)
 
     n_frames = 100
-    fps = 20
+    fps = p.tfps
     model_file = p.ckpt_file
     model = RiskyObject(p.x_dim, p.h_dim, n_frames, fps)
 
-    result_csv = os.path.join(result_dir, f'result_ablation_10_{date_saved}_{current_time}.csv')
+    result_csv = os.path.join(result_dir, f'result_{date_saved}_{current_time}.csv')
     with open(result_csv, 'a', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([f"data_path: {data_path} "])
         writer.writerow(
-            [f"x_dim: {model.x_dim}, base_h_dim: {model.h_dim}, base_n_layers: {model.n_layers}, cor_n_layers: {model.n_layers_cor}, h_dim_cor:{model.h_dim_cor}, weight: {model.weight}"])
+            [f"x_dim: {model.x_dim}, base_h_dim: {model.h_dim}, base_n_layers: {model.n_layers}, "
+             f"cor_n_layers: {model.n_layers_cor}, h_dim_cor:{model.h_dim_cor}, weight: {model.weight}, "
+             f"dfps: {p.dfps}, tfps: {p.tfps}"])
         writer.writerow(['epoch', 'loss_val', 'roc_auc', 'ap'])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=p.base_lr)
@@ -242,8 +246,10 @@ def train_eval():
     write_weight_histograms(logger, model, 0)
 
     iter_cur = 0
-    auc_max = 0
-    ap_max = 0
+    auc_max_list = [0, 0, 0]
+    auc_max_k = [-1, -1, -1]
+    ap_max_list = [0, 0, 0]
+    ap_max_k = [-1, -1, -1]
     # optional
     # roc_auc = 0
     # ap = 0
@@ -264,7 +270,8 @@ def train_eval():
     #         print(name)
 
     for k in range(p.epoch):
-        loop = tqdm(enumerate(traindata_loader), total=len(traindata_loader))
+        L_data = len(traindata_loader)
+        loop = tqdm(enumerate(traindata_loader), total=L_data)
         if k <= start_epoch:
             iter_cur += len(traindata_loader)
             continue
@@ -285,6 +292,11 @@ def train_eval():
             # To-DO:
             lr = optimizer.param_groups[0]['lr']
             write_scalars(logger, k, losses, lr)
+            # Log gradients
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    logger.add_histogram(f'{name}.grad', param.grad, k * L_data + i)  # Log the gradient histogram
+
             # ---------------
             iter_cur = 0
 
@@ -312,40 +324,50 @@ def train_eval():
         model.train()
 
         write_pr_curve_tensorboard(logger, all_pred, all_labels)
-        model_file = os.path.join(model_dir, 'model_%02d.pth' % (k))
-
-        torch.save({'epoch': k,
-                    'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict()}, model_file)
+        # model_file = os.path.join(model_dir, 'model_%02d.pth' % (k))
+        #
+        # torch.save({'epoch': k,
+        #             'model': model.state_dict(),
+        #             'optimizer': optimizer.state_dict()}, model_file)
 
         ##########################################################################
-        model_file = os.path.join(model_dir, f'ckpt{k}_auc{roc_auc:.2f}_ap{ap:.2f}.pth')
-        torch.save({'epoch': k,
-                    'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict()}, model_file)
-        print('the model has been saved as: %s' % (model_file))
+        # model_file = os.path.join(model_dir, f'ckpt{k}_auc{roc_auc:.2f}_ap{ap:.2f}.pth')
+        # torch.save({'epoch': k,
+        #             'model': model.state_dict(),
+        #             'optimizer': optimizer.state_dict()}, model_file)
+        # print('the model has been saved as: %s' % (model_file))
+
         # # save model
-        # if roc_auc > auc_max:
-        #     auc_max = roc_auc
-        #     model_file = os.path.join(model_dir, 'best_auc_%02d.pth' % (k))
-        #     #model_file = os.path.join(model_dir, 'best_auc.pth')
-        #     torch.save({'epoch': k,
-        #                 'model': model.state_dict(),
-        #                 'optimizer': optimizer.state_dict()}, model_file)
-        #     print('Best AUC Model has been saved as: %s' % (model_file))
-        # elif ap > ap_max:
-        #     ap_max = ap
-        #     model_file = os.path.join(model_dir, 'best_ap_%02d.pth' % (k))
-        #     # model_file = os.path.join(model_dir, 'best_ap.pth')
-        #     torch.save({'epoch': k,
-        #                 'model': model.state_dict(),
-        #                 'optimizer': optimizer.state_dict()}, model_file)
-        #     print('Best AP Model has been saved as: %s' % (model_file))
+        auc_max_list_ = auc_max_list + [roc_auc]
+        del_k = np.argmin(auc_max_list_)
+        if del_k != 3:
+            del_path = os.path.join(model_dir, f'best_auc_{auc_max_k[del_k]}.pth')
+            if os.path.exists(del_path):
+                os.remove(del_path)
+            model_file = os.path.join(model_dir, f'best_auc_{k}.pth')
+            torch.save({'epoch': k,
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict()}, model_file)
+            auc_max_list[del_k] = roc_auc
+            auc_max_k[del_k] = k
+            print(f'Best AUC Model has been saved as: {model_file}. (del {auc_max_k[del_k]}, auc_list {auc_max_list})')
+        ap_max_list_ = ap_max_list + [ap]
+        del_k = np.argmin(ap_max_list_)
+        if del_k != 3:
+            del_path = os.path.join(model_dir, f'best_ap_{ap_max_k[del_k]}.pth')
+            if os.path.exists(del_path):
+                os.remove(del_path)
+            model_file = os.path.join(model_dir, f'best_ap_{k}.pth')
+            torch.save({'epoch': k,
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict()}, model_file)
+            ap_max_list[del_k] = ap
+            ap_max_k[del_k] = k
+            print(f'Best AP Model has been saved as: {model_file}. (del {ap_max_k[del_k]}, ap_list {ap_max_list})')
         ###########################################################################
         scheduler.step(losses['cross_entropy'])
         # write histograms
         write_weight_histograms(logger, model, k+1)
-    logger.close()
 
 
 def _load_checkpoint(model, optimizer=None, filename='checkpoint.pth.tar'):
@@ -368,14 +390,14 @@ def test_eval():
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device)  # val
-    # test_data = MyDataset(data_path, 'sidewipe', toTensor=True, device=device)  # val
+    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)  # val
+    # test_data = MyDataset(data_path, 'sidewipe', toTensor=True, device=device, data_fps=20, target_fps=20)  # val
 
     testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
                                  shuffle=False, drop_last=True)
 
     n_frames = 100  # unnecessary
-    fps = 20  # unnecessary
+    fps = p.tfps  # unnecessary
 
     model_file = p.ckpt_file  # directory of the model file
     model = RiskyObject(p.x_dim, p.h_dim, n_frames, fps)
@@ -400,8 +422,10 @@ def test_eval():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/',
+    parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature',  # '/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/'
                         help='The relative path of dataset.')
+    parser.add_argument('--tfps', type=int, default=20, help='Target FPS. Default: 20')
+    parser.add_argument('--dfps', type=int, default=20, help='The FPS of data. Default: 20')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 1')
     parser.add_argument('--base_lr', type=float, default=1e-3,
@@ -415,10 +439,10 @@ if __name__ == '__main__':
     parser.add_argument('--phase', type=str, default='train', choices=['check', 'train', 'test'],
                         help='dimension of the resnet output. Default: 2048')
     parser.add_argument('--output_dir', type=str, default='./checkpoints',
-                        help='The relative path of dataset.')
+                        help='The log dir')
     parser.add_argument('--test_iter', type=int, default=1,
                         help='The number of epochs to perform a evaluation process. Default: 64')
-    parser.add_argument('--ckpt_file', type=str, default='checkpoints/pretrained/best_auc.pth',
+    parser.add_argument('--ckpt_file', type=str, default='',  # 'checkpoints/pretrained/best_auc.pth'
                         help='model file')
     parser.add_argument('--resume', action='store_true',
                         help='If to resume the training. Default: False')
