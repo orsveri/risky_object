@@ -113,7 +113,7 @@ def main():
         flow_zip = os.path.join(clip_folder, "flow.zip")
         out_file = os.path.join(clip_folder, f"{os.path.basename(clip_folder)}.npz")
         if os.path.exists(out_file):
-            os.remove(out_file)
+            continue
         frames = natsorted(dets["frame"].unique())
         N = len(frames) - 1
         if N < 1:
@@ -213,7 +213,7 @@ if __name__ == '__main__':
     main()
 
 # --path /mnt/experiments/sorlova/datasets/GTACrash/dataset --start 0 --stop -1
-# export CUDA_VISIBLE_DEVICES=1 && cd repos/TADTAA/risky_object/feat_extract/ && conda activate gg
+# export CUDA_VISIBLE_DEVICES=2 && cd repos/TADTAA/risky_object/feat_extract/ && conda activate gg
 # python feat_extract_my_gta.py --path /mnt/experiments/sorlova/datasets/GTACrash/dataset --start 0 --stop 1500
 
 

@@ -6,6 +6,7 @@ from datetime import date
 import time
 
 import torch
+from torch.ao.nn.quantized.functional import threshold
 from torch.utils.data import DataLoader
 from models.model import RiskyObject
 from models.evaluation import evaluation, plot_auc_curve, plot_pr_curve, frame_auc
@@ -83,28 +84,41 @@ def write_weight_histograms(logger, model, epoch):
 
 
 def test_all(testdata_loader, model):
-
+    # Hre we know that the batch size is 0 and we do not have batch dimension in the model's outputs
     all_pred = []
     all_labels = []
     losses_all = []
+    all_toa = []
+    all_frame_pred = []
 
     with torch.no_grad():
         for batch_xs, batch_det, batch_toas, batch_flow in tqdm(testdata_loader):
             losses, all_outputs, labels = model(batch_xs, batch_det, batch_toas, batch_flow)
+            all_toa.extend(batch_toas.cpu().detach()[:, 0].tolist())
+
+            frame_preds = []
+            clip_labels = []
 
             losses_all.append(losses)
             T = len(all_outputs)
             for t in range(T):
                 frame = all_outputs[t]
                 if len(frame) == 0:
+                    frame_preds.append(0)
                     continue
                 else:
+                    frame_scores = []
                     for j in range(len(frame)):
-                        score = np.exp(frame[j][:, 1])/np.sum(np.exp(frame[j]), axis=1)
+                        score = np.exp(frame[j][:, 1])/np.sum(np.exp(frame[j]), axis=1)[0]
                         all_pred.append(score)
-                        all_labels.append(labels[t][j]+0)  # added zero to convert array to scalar
+                        frame_scores.append(score)
+                        clip_labels.append(int(labels[t][j]+0))  # added zero to convert array to scalar
+                    frame_preds.append(max(frame_scores)[0])
+            all_frame_pred.append(np.array(frame_preds, dtype=float))
+            all_labels.append(clip_labels)
+    #all_frame_pred = np.array(all_frame_pred) changing seq length
     # all_pred = np.array([all_pred[i][0] for i in range(len(all_pred))])
-    return losses_all, all_pred, all_labels
+    return losses_all, all_pred, all_labels, all_toa, all_frame_pred
 
 
 def average_losses(losses_all):
@@ -133,7 +147,7 @@ def sanity_check():
 
     print("Creating datasets...")
 
-    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=20, target_fps=20)
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=20, target_fps=20, n_clips=p.d)
     test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=20, target_fps=20)
 
     traindata_loader = DataLoader(
@@ -202,13 +216,15 @@ def train_eval():
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
     test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)
 
     traindata_loader = DataLoader(
-        dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True)
-    testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
-                                 shuffle=False, drop_last=True)
+        dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True
+    )
+    testdata_loader = DataLoader(
+        dataset=test_data, batch_size=p.batch_size, shuffle=False, drop_last=True
+    )
 
     n_frames = 100
     fps = p.tfps
@@ -223,7 +239,7 @@ def train_eval():
             [f"x_dim: {model.x_dim}, base_h_dim: {model.h_dim}, base_n_layers: {model.n_layers}, "
              f"cor_n_layers: {model.n_layers_cor}, h_dim_cor:{model.h_dim_cor}, weight: {model.weight}, "
              f"dfps: {p.dfps}, tfps: {p.tfps}"])
-        writer.writerow(['epoch', 'loss_val', 'roc_auc', 'ap'])
+        writer.writerow(['epoch', 'loss_val', 'mTTA', 'TTA_RT', 'P_RT', 'threshold', 'roc_auc', 'ap'])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=p.base_lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -277,6 +293,7 @@ def train_eval():
             continue
         for i, (batch_xs, batch_det, batch_toas, batch_flow) in loop:
             optimizer.zero_grad()
+
             losses, all_outputs, all_labels = model(batch_xs, batch_det, batch_toas, batch_flow)
 
             # backward
@@ -304,10 +321,10 @@ def train_eval():
         print('----------------------------------')
         print("Starting evaluation...")
         model.eval()
-        losses_all, all_pred, all_labels = test_all(testdata_loader, model)
+        losses_all, all_pred, all_labels, all_toa, all_frame_pred = test_all(testdata_loader, model)
 
         loss_val = average_losses(losses_all)
-        fpr, tpr, roc_auc = evaluation(all_pred, all_labels, k)
+        fpr, tpr, roc_auc, tta = evaluation(all_pred, all_labels, k, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred)
         plot_auc_curve(fpr, tpr, roc_auc, k)
         ap = plot_pr_curve(all_labels, all_pred, k)
 
@@ -319,23 +336,14 @@ def train_eval():
 
         with open(result_csv, 'a+', newline='') as saving_result:
             writer = csv.writer(saving_result)
-            writer.writerow([k, loss_val, roc_auc, ap])
+            writer.writerow([k, loss_val, tta["mTTA"], tta["TTA_RT"], tta["P_RT"], tta["threshold"], roc_auc, ap])
 
         model.train()
 
-        write_pr_curve_tensorboard(logger, all_pred, all_labels)
-        # model_file = os.path.join(model_dir, 'model_%02d.pth' % (k))
-        #
-        # torch.save({'epoch': k,
-        #             'model': model.state_dict(),
-        #             'optimizer': optimizer.state_dict()}, model_file)
-
-        ##########################################################################
-        # model_file = os.path.join(model_dir, f'ckpt{k}_auc{roc_auc:.2f}_ap{ap:.2f}.pth')
-        # torch.save({'epoch': k,
-        #             'model': model.state_dict(),
-        #             'optimizer': optimizer.state_dict()}, model_file)
-        # print('the model has been saved as: %s' % (model_file))
+        all_labels_flat = []
+        for label in all_labels:
+            all_labels_flat.extend(label)
+        write_pr_curve_tensorboard(logger, all_pred, all_labels_flat)
 
         # # save model
         auc_max_list_ = auc_max_list + [roc_auc]
@@ -406,15 +414,15 @@ def test_eval():
     model, _, _ = _load_checkpoint(model, filename=model_file)
     print('Checkpoints loaded successfully')
     print('Computing.........')
-    losses_all, all_pred, all_labels = test_all(testdata_loader, model)
-    k = 8
+    losses_all, all_pred, all_labels, all_toa, all_frame_pred = test_all(testdata_loader, model)
     loss_val = average_losses(losses_all)
-    fpr, tpr, roc_auc = evaluation(all_pred, all_labels, k)
-    plot_auc_curve(fpr, tpr, roc_auc, k)
-    ap = plot_pr_curve(all_labels, all_pred, k)
+    fpr, tpr, roc_auc, tta = evaluation(all_pred, all_labels, p.epoch, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred)
+    plot_auc_curve(fpr, tpr, roc_auc, p.epoch, base_logdir=p.output_dir, tag="val")
+    ap = plot_pr_curve(all_labels, all_pred, p.epoch, base_logdir=p.output_dir, tag="val")
 
     print(f"AUC : {roc_auc:.4f}")
     print(f"AP : {ap:.4f}")
+    print(tta)
     print('=====================')
 
     return
@@ -424,10 +432,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature',  # '/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/'
                         help='The relative path of dataset.')
+    parser.add_argument('--d', type=int, default=None, help='Number of clips.')
     parser.add_argument('--tfps', type=int, default=20, help='Target FPS. Default: 20')
     parser.add_argument('--dfps', type=int, default=20, help='The FPS of data. Default: 20')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 1')
+    parser.add_argument('--threshold', type=float, default=0.8,
+                        help='Recall threshold for Precision and TTA. Default: 0.8')
     parser.add_argument('--base_lr', type=float, default=1e-3,
                         help='The base learning rate. Default: 1e-3')
     parser.add_argument('--epoch', type=int, default=30,
@@ -456,3 +467,5 @@ if __name__ == '__main__':
         sanity_check()
     else:
         train_eval()
+
+#--data_path /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --phase=train --batch_size=1 --output_dir=logs/rol_fps10_dota --dfps 20 --tfps 20 --ckpt_file logs/rol_fps10/ckpts/best_ap_12.pth

@@ -7,6 +7,7 @@ import numpy as np
 import pickle
 import torch
 from torch.utils.data import Dataset, Sampler, ConcatDataset
+import random
 
 
 class ConcatBatchSampler(Sampler):
@@ -72,7 +73,7 @@ class ConcatBatchSampler(Sampler):
 
 
 class MyDataset(Dataset):
-    def __init__(self, data_path, phase, data_fps, target_fps, toTensor=False,  device=torch.device('cuda')):
+    def __init__(self, data_path, phase, data_fps, target_fps, toTensor=False,  device=torch.device('cuda'), n_clips=None):
         self.data_path = data_path
         self.phase = phase
         self.toTensor = toTensor
@@ -86,13 +87,17 @@ class MyDataset(Dataset):
         self.dim_feature = 2048
         filepath = os.path.join(self.data_path, phase)
         self.files_list = self.get_filelist(filepath)
+        self.n_clips = n_clips
+        if n_clips is not None:
+            random.seed = 42
+            random.shuffle(self.files_list)
+            self.files_list = self.files_list[:n_clips]
         print(f"Dataset for {phase} initialized!")
         # print(self.files_list)
 
     def __len__(self):
         data_len = len(self.files_list)
-        #return data_len
-        return 10
+        return data_len
 
     def get_filelist(self, filepath):
         assert os.path.exists(filepath), "Directory does not exist: %s" % (filepath)

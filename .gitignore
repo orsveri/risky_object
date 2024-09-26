@@ -3,7 +3,7 @@ feat_extract/data/
 feat_extract/track_text/
 feat_extract/csv_files/
 feat_extract/feature/
-logs/dota/charts/
+logs/
 archive/
 checkpoints/
 checkpoints_till_22_jully/

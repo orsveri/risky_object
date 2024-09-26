@@ -224,8 +224,7 @@ class RiskyObject(nn.Module):
                         x_obj = torch.unsqueeze(x_obj, 0)  # 1 x 512
                         x_obj = torch.unsqueeze(x_obj, 0)  # 1 x 1 x 512 // B, L, C
 
-                        output, h_out = self.gru_net(
-                            x_obj, h_in, output_cor)  # 1x1x256
+                        output, h_out = self.gru_net(x_obj, h_in, output_cor)  # 1x1x256
                         target = y[0][t][bbox][5].to(torch.long)
                         target = torch.as_tensor([target], device=torch.device('cuda'))
 
