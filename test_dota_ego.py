@@ -6,14 +6,19 @@ from datetime import date
 import time
 
 import torch
-from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
+from natsort import natsorted
+from torch.ao.nn.quantized.functional import threshold
+from torch.utils.data import DataLoader
+
 from models.model import RiskyObject
 from models.evaluation import evaluation, plot_auc_curve, plot_pr_curve, frame_auc
-from dataloader import MyDataset, ConcatBatchSampler
+from dataloader import MyDataset
 import argparse
 from tqdm import tqdm
 import os
+import json
 import shutil
+from natsort import natsorted
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import csv
@@ -27,6 +32,49 @@ torch.manual_seed(seed)
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+
+
+class DoTAEgoDataset(MyDataset):
+    def __init__(self, dota_anno_file, **kwargs):
+        super().__init__(**kwargs)
+        with open(dota_anno_file, "r") as f:
+            anno = json.load(f)
+        self.classes = natsorted(list(set([v["anomaly_class"] for v in anno.values()])))
+        anno = {k: {"ego": v["anomaly_class"].startswith("ego:"), "class": self.classes.index(v["anomaly_class"])} for k, v in anno.items()}
+        self.dota_anno_file = anno
+
+    def __getitem__(self, index):
+        data_file = os.path.join(self.data_path, self.phase, self.files_list[index])
+        assert os.path.exists(data_file)
+        clip_name = os.path.splitext(os.path.basename(data_file))[0]
+        anno = self.dota_anno_file[clip_name]
+        clip_class = anno["class"]
+        clip_ego = anno["ego"]
+        try:
+            data = np.load(data_file)
+            features = data['feature']  # 100 x 31 x 2048
+            toa = [data['toa']+0]  # 1
+            detection = data['detection']  # labels : data['detection'][:,:,5] --> 100 x 30
+            flow = data['flow_feat']  # 100 x 31 x 2048
+            # track_id : data['detection'][:,:,0] --> 100 x 30
+        except:
+            raise IOError('Load data error! File: %s' % (data_file))
+
+        N = features.shape[0]
+        if self.fps_step != 1:
+            start = (N - 1) % self.fps_step
+            features = features[start::self.fps_step]
+            detection = detection[start::self.fps_step]
+            flow = flow[start::self.fps_step]
+            toa = [toa[0] / self.fps_step]
+
+        if self.toTensor:
+            features = torch.Tensor(features).to(self.device)  # 50 x 20 x 4096
+            detection = torch.Tensor(detection).to(self.device)
+            toa = torch.Tensor(toa).to(self.device)
+            flow = torch.Tensor(flow).to(self.device)
+
+        return features, detection, toa, flow, (clip_class, clip_ego)
 
 
 def write_scalars(logger, epoch, losses, lr):
@@ -83,24 +131,26 @@ def write_weight_histograms(logger, model, epoch):
 
 
 def test_all(testdata_loader, model):
-
-    all_pred = []
-    all_labels = []
-    losses_all = []
-    all_toa = []
-    all_frame_pred = []
-    all_frame_labels = []
+    # Hre we know that the batch size is 0 and we do not have batch dimension in the model's outputs
+    all_pred = {"ego": [], "other": []}
+    all_labels = {"ego": [], "other": []}
+    losses_all = {"ego": [], "other": []}
+    all_toa = {"ego": [], "other": []}
+    all_frame_pred = {"ego": [], "other": []}
+    all_frame_labels = {"ego": [], "other": []}
+    all_classes = {"ego": [], "other": []}
 
     with torch.no_grad():
-        for batch_xs, batch_det, batch_toas, batch_flow in tqdm(testdata_loader):
+        for batch_xs, batch_det, batch_toas, batch_flow, (clip_class, clip_ego) in tqdm(testdata_loader):
+            tag = "ego" if clip_ego else "other"
             losses, all_outputs, labels = model(batch_xs, batch_det, batch_toas, batch_flow)
-            all_toa.extend(batch_toas.cpu().detach()[:, 0].tolist())
+            all_toa[tag].extend(batch_toas.cpu().detach()[:, 0].tolist())
 
             frame_preds = []
             frame_labels = []
             obj_labels = []
 
-            losses_all.append(losses)
+            losses_all[tag].append(losses)
             T = len(all_outputs)
             for t in range(T):
                 frame = all_outputs[t]
@@ -112,14 +162,16 @@ def test_all(testdata_loader, model):
                     frame_scores = []
                     for j in range(len(frame)):
                         score = np.exp(frame[j][:, 1])/np.sum(np.exp(frame[j]), axis=1)[0]
-                        all_pred.append(score)
+                        all_pred[tag].append(score)
                         frame_scores.append(score)
                         obj_labels.append(int(labels[t][j]+0))  # added zero to convert array to scalar
                     frame_preds.append(max(frame_scores)[0])
                     frame_labels.append(max(obj_labels))
-            all_frame_pred.append(np.array(frame_preds, dtype=float))
-            all_frame_labels.append(np.array(frame_labels, dtype=float))
-            all_labels.append(obj_labels)
+            all_frame_pred[tag].append(np.array(frame_preds, dtype=float))
+            all_frame_labels[tag].append(np.array(frame_labels, dtype=float))
+            all_labels[tag].append(obj_labels)
+
+    #all_frame_pred = np.array(all_frame_pred) changing seq length
     # all_pred = np.array([all_pred[i][0] for i in range(len(all_pred))])
     return losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels
 
@@ -150,8 +202,9 @@ def sanity_check():
 
     print("Creating datasets...")
 
-    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=20, target_fps=20)
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=20, target_fps=20)
+    dota_anno = os.path.join(data_path, "metadata_val.json")
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=20, target_fps=20, n_clips=p.d)
+    test_data = DoTAEgoDataset(dota_anno_file=dota_anno, data_path=data_path, phase='val', toTensor=True, device=device, data_fps=20, target_fps=20)
 
     traindata_loader = DataLoader(
         dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True)
@@ -196,6 +249,7 @@ def sanity_check():
 def train_eval():
 
     # data_path = os.path.join(ROOT_PATH, p.data_path, p.dataset)
+    data_path = p.data_path
     model_dir = os.path.join(p.output_dir, 'ckpts')
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
@@ -218,13 +272,10 @@ def train_eval():
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    train_data1 = MyDataset(p.data_path1, 'train', toTensor=True, device=device, data_fps=p.dfps1, target_fps=p.tfps, n_clips=p.d1)
-    train_data2 = MyDataset(p.data_path2, 'train', toTensor=True, device=device, data_fps=p.dfps2, target_fps=p.tfps, n_clips=p.d2)
-    train_data = ConcatDataset([train_data1, train_data2])
-    test_data1 = MyDataset(p.data_path1, 'val', toTensor=True, device=device, data_fps=p.dfps1, target_fps=p.tfps)
-    #test_data2 = MyDataset(p.data_path2, 'val', toTensor=True, device=device, data_fps=p.dfps2, target_fps=p.tfps)
-    #test_data = ConcatDataset([test_data1, test_data2])
-    test_data = test_data1
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
+    dota_anno = os.path.join(data_path, "metadata_val.json")
+    test_data = DoTAEgoDataset(dota_anno_file=dota_anno, data_path=data_path, phase='val', toTensor=True, device=device,
+                               data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
 
     traindata_loader = DataLoader(
         dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True
@@ -241,12 +292,11 @@ def train_eval():
     result_csv = os.path.join(result_dir, f'result_{date_saved}_{current_time}.csv')
     with open(result_csv, 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([f"data_path1: {p.data_path1}, n_clips {p.d1}, dfps {p.dfps1}"])
-        writer.writerow([f"data_path2: {p.data_path2}, n_clips {p.d1}, dfps {p.dfps1}"])
+        writer.writerow([f"data_path: {data_path} "])
         writer.writerow(
             [f"x_dim: {model.x_dim}, base_h_dim: {model.h_dim}, base_n_layers: {model.n_layers}, "
              f"cor_n_layers: {model.n_layers_cor}, h_dim_cor:{model.h_dim_cor}, weight: {model.weight}, "
-             f"tfps: {p.tfps}"])
+             f"dfps: {p.dfps}, tfps: {p.tfps}"])
         writer.writerow(['epoch', 'loss_val', 'mTTA', 'TTA_RT', 'P_RT', 'threshold', 'roc_auc', 'ap'])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=p.base_lr)
@@ -301,6 +351,7 @@ def train_eval():
             continue
         for i, (batch_xs, batch_det, batch_toas, batch_flow) in loop:
             optimizer.zero_grad()
+
             losses, all_outputs, all_labels = model(batch_xs, batch_det, batch_toas, batch_flow)
 
             # backward
@@ -385,7 +436,7 @@ def train_eval():
         ###########################################################################
         scheduler.step(losses['cross_entropy'])
         # write histograms
-        write_weight_histograms(logger, model, k + 1)
+        write_weight_histograms(logger, model, k+1)
 
 
 def _load_checkpoint(model, optimizer=None, filename='checkpoint.pth.tar'):
@@ -408,8 +459,8 @@ def test_eval():
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)  # val
-    # test_data = MyDataset(data_path, 'sidewipe', toTensor=True, device=device, data_fps=20, target_fps=20)  # val
+    dota_anno = os.path.join(data_path, "metadata_val.json")
+    test_data = DoTAEgoDataset(dota_anno_file=dota_anno, data_path=data_path, phase='val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
 
     testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
                                  shuffle=False, drop_last=True)
@@ -424,18 +475,27 @@ def test_eval():
     model, _, _ = _load_checkpoint(model, filename=model_file)
     print('Checkpoints loaded successfully')
     print('Computing.........')
-    losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = test_all(testdata_loader, model)
-    loss_val = average_losses(losses_all)
-    fpr, tpr, roc_auc, tta, frame_results = evaluation(
-        all_pred, all_labels, p.epoch, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
-        all_frame_labels=all_frame_labels
-    )
-    plot_auc_curve(fpr, tpr, roc_auc, p.epoch, base_logdir=p.output_dir, tag="val")
-    ap = plot_pr_curve(all_labels, all_pred, p.epoch, base_logdir=p.output_dir, tag="val")
-
-    print(f"AUC : {roc_auc:.4f}")
-    print(f"AP : {ap:.4f}")
-    print(tta)
+    losses_all_, all_pred_, all_labels_, all_toa_, all_frame_pred_, all_frame_labels_ = test_all(testdata_loader, model)
+    print('=====================')
+    for tag in ("ego", "other"):
+        losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = losses_all_[tag], all_pred_[tag], all_labels_[tag], all_toa_[tag], all_frame_pred_[tag], all_frame_labels_[tag]
+        loss_val = average_losses(losses_all)
+        fpr, tpr, roc_auc, tta, frame_results = evaluation(
+            all_pred, all_labels, p.epoch, fps=p.tfps, threshold=p.threshold, toa=all_toa,
+            all_frame_pred=all_frame_pred, all_frame_labels=all_frame_labels
+        )
+        plot_auc_curve(fpr, tpr, roc_auc, p.epoch, base_logdir=p.output_dir, tag=f"{tag}_val")
+        ap = plot_pr_curve(all_labels, all_pred, p.epoch, base_logdir=p.output_dir, tag=f"{tag} val")
+        print(f"{tag} | [OBJECT LEVEL] | Count: objects {len(all_pred)}")
+        print(f"{tag} | \tAUC : {roc_auc:.4f}, AP : {ap:.4f}")
+        if frame_results is not None:
+            frame_fpr, frame_tpr, frame_roc_auc = frame_results
+            frame_ap = plot_pr_curve(all_frame_labels, np.concatenate(all_frame_pred, axis=None), p.epoch, base_logdir=p.output_dir, tag=f"{tag}_val_frame")
+            plot_auc_curve(frame_fpr, frame_tpr, frame_roc_auc, p.epoch, base_logdir=p.output_dir, tag=f"{tag}_val_frame")
+            print(f"{tag} | [FRAME LEVEL] | Count: frames {len(all_frame_pred)}")
+            print(f"{tag} | \tAUC : {frame_roc_auc:.4f}, AP : {frame_ap:.4f}")
+            print(f"{tag} | \t{tta}")
+        print('---------------------')
     print('=====================')
 
     return
@@ -443,17 +503,11 @@ def test_eval():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path1', type=str, default='/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature',  # '/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/'
+    parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature',  # '/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/'
                         help='The relative path of dataset.')
-    parser.add_argument('--data_path2', type=str,
-                        default='/mnt/experiments/sorlova/datasets/GTACrash/AMNet_feats',
-                        # '/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/'
-                        help='The relative path of dataset.')
-    parser.add_argument('--d1', type=int, default=None, help='Number of clips.')
-    parser.add_argument('--d2', type=int, default=None, help='Number of clips.')
+    parser.add_argument('--d', type=int, default=None, help='Number of clips.')
     parser.add_argument('--tfps', type=int, default=20, help='Target FPS. Default: 20')
-    parser.add_argument('--dfps1', type=int, default=20, help='The FPS of data. Default: 20')
-    parser.add_argument('--dfps2', type=int, default=10, help='The FPS of data. Default: 20')
+    parser.add_argument('--dfps', type=int, default=20, help='The FPS of data. Default: 20')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 1')
     parser.add_argument('--threshold', type=float, default=0.8,
@@ -487,7 +541,4 @@ if __name__ == '__main__':
     else:
         train_eval()
 
-# export CUDA_VISIBLE_DEVICES=0 && cd repos/TADTAA/risky_object/ && conda activate gg
-# --phase=train --output_dir logs/check_mix --batch_size 1 --tfps 10 --data_path1 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature --dfps1 20 --d1 30 --data_path2 /mnt/experiments/sorlova/datasets/GTACrash/AMNet_feats --dfps2 10 --d2 50
-# --phase=train --output_dir logs/check_mix --batch_size 1 --tfps 10 --data_path1 /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --dfps1 20 --d1 30 --data_path2 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature --dfps2 10 --d2 50
-
+#--data_path /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --phase=train --batch_size=1 --output_dir=logs/rol_fps10_dota --dfps 20 --tfps 20 --ckpt_file logs/rol_fps10/ckpts/best_ap_12.pth

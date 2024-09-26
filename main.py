@@ -90,6 +90,7 @@ def test_all(testdata_loader, model):
     losses_all = []
     all_toa = []
     all_frame_pred = []
+    all_frame_labels = []
 
     with torch.no_grad():
         for batch_xs, batch_det, batch_toas, batch_flow in tqdm(testdata_loader):
@@ -97,7 +98,8 @@ def test_all(testdata_loader, model):
             all_toa.extend(batch_toas.cpu().detach()[:, 0].tolist())
 
             frame_preds = []
-            clip_labels = []
+            frame_labels = []
+            obj_labels = []
 
             losses_all.append(losses)
             T = len(all_outputs)
@@ -105,6 +107,7 @@ def test_all(testdata_loader, model):
                 frame = all_outputs[t]
                 if len(frame) == 0:
                     frame_preds.append(0)
+                    frame_labels.append(0)
                     continue
                 else:
                     frame_scores = []
@@ -112,13 +115,15 @@ def test_all(testdata_loader, model):
                         score = np.exp(frame[j][:, 1])/np.sum(np.exp(frame[j]), axis=1)[0]
                         all_pred.append(score)
                         frame_scores.append(score)
-                        clip_labels.append(int(labels[t][j]+0))  # added zero to convert array to scalar
+                        obj_labels.append(int(labels[t][j]+0))  # added zero to convert array to scalar
                     frame_preds.append(max(frame_scores)[0])
+                    frame_labels.append(max(obj_labels))
             all_frame_pred.append(np.array(frame_preds, dtype=float))
-            all_labels.append(clip_labels)
+            all_frame_labels.append(np.array(frame_labels, dtype=float))
+            all_labels.append(obj_labels)
     #all_frame_pred = np.array(all_frame_pred) changing seq length
     # all_pred = np.array([all_pred[i][0] for i in range(len(all_pred))])
-    return losses_all, all_pred, all_labels, all_toa, all_frame_pred
+    return losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels
 
 
 def average_losses(losses_all):
@@ -321,10 +326,13 @@ def train_eval():
         print('----------------------------------')
         print("Starting evaluation...")
         model.eval()
-        losses_all, all_pred, all_labels, all_toa, all_frame_pred = test_all(testdata_loader, model)
+        losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = test_all(testdata_loader, model)
 
         loss_val = average_losses(losses_all)
-        fpr, tpr, roc_auc, tta = evaluation(all_pred, all_labels, k, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred)
+        fpr, tpr, roc_auc, tta, frame_results = evaluation(
+            all_pred, all_labels, k, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
+            all_frame_labels=all_frame_labels
+        )
         plot_auc_curve(fpr, tpr, roc_auc, k)
         ap = plot_pr_curve(all_labels, all_pred, k)
 
@@ -398,7 +406,7 @@ def test_eval():
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)  # val
+    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)  # val
     # test_data = MyDataset(data_path, 'sidewipe', toTensor=True, device=device, data_fps=20, target_fps=20)  # val
 
     testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
@@ -414,9 +422,12 @@ def test_eval():
     model, _, _ = _load_checkpoint(model, filename=model_file)
     print('Checkpoints loaded successfully')
     print('Computing.........')
-    losses_all, all_pred, all_labels, all_toa, all_frame_pred = test_all(testdata_loader, model)
+    losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = test_all(testdata_loader, model)
     loss_val = average_losses(losses_all)
-    fpr, tpr, roc_auc, tta = evaluation(all_pred, all_labels, p.epoch, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred)
+    fpr, tpr, roc_auc, tta, frame_results = evaluation(
+        all_pred, all_labels, p.epoch, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
+        all_frame_labels=all_frame_labels
+    )
     plot_auc_curve(fpr, tpr, roc_auc, p.epoch, base_logdir=p.output_dir, tag="val")
     ap = plot_pr_curve(all_labels, all_pred, p.epoch, base_logdir=p.output_dir, tag="val")
 

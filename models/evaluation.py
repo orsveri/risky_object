@@ -34,12 +34,12 @@ def evaluation_tta(all_frame_pred, all_frame_labels, time_of_accidents, threshol
 
     # iterate a set of thresholds from the minimum predictions
     Precision = np.zeros((n_frames))
-#     print(Precision.shape)
+    # print(Precision.shape)
     Recall = np.zeros((n_frames))
     Time = np.zeros((n_frames))
-#     Precision = np.zeros((200))
-#     Recall = np.zeros((200))
-#     Time = np.zeros((200))
+    # Precision = np.zeros((200))
+    # Recall = np.zeros((200))
+    # Time = np.zeros((200))
     cnt = 0
     for Th in np.arange(max(min_pred, 0), 1.0, 0.001):
         Tp = 0.0
@@ -80,7 +80,9 @@ def evaluation_tta(all_frame_pred, all_frame_labels, time_of_accidents, threshol
     Recall = Recall[new_index]
     Time = Time[new_index]
     # unique the recall, and fetch corresponding precisions and TTAs
-    _, rep_index = np.unique(Recall, return_index=1)
+    _, rep_index = np.unique(Recall, return_index=True)
+    if len(rep_index) == 1:
+        return None
     rep_index = rep_index[1:]
     new_Time = np.zeros(len(rep_index))
     new_Precision = np.zeros(len(rep_index))
@@ -110,7 +112,7 @@ def evaluation_tta(all_frame_pred, all_frame_labels, time_of_accidents, threshol
     return {"mTTA": mTTA, "TTA_RT": TTA_RT, "P_RT": P_RT, "threshold": threshold}
 
 
-def evaluation(all_pred, all_labels, epoch, fps, toa=None, all_frame_pred=None, threshold=0.3):
+def evaluation(all_pred, all_labels, epoch, fps, toa=None, all_frame_pred=None, all_frame_labels=None, threshold=0.3):
     all_labels_flat = []
     for label in all_labels:
         all_labels_flat.extend(label)
@@ -118,9 +120,18 @@ def evaluation(all_pred, all_labels, epoch, fps, toa=None, all_frame_pred=None, 
     # np.savez('auc.npz', fpr=fpr, tpr=tpr, thresholds=thresholds)
     roc_auc = metrics.auc(fpr, tpr)
     tta = None
+    frame_results = None
+    if all_frame_pred is not None and all_frame_labels is not None:
+        frame_fpr, frame_tpr, frame_thresholds = metrics.roc_curve(
+            np.array(np.concatenate(all_frame_labels, axis=None)),
+            np.array(np.concatenate(all_frame_pred, axis=None)),
+            pos_label=1
+        )
+        frame_roc_auc = metrics.auc(frame_fpr, frame_tpr)
+        frame_results = (frame_fpr, frame_tpr, frame_roc_auc)
     if toa is not None and all_frame_pred is not None:
         tta = evaluation_tta(all_frame_pred=all_frame_pred, all_frame_labels=all_labels, time_of_accidents=toa, fps=fps, threshold=threshold)
-    return fpr, tpr, roc_auc, tta
+    return fpr, tpr, roc_auc, tta, frame_results
 
 
 def plot_auc_curve(fpr, tpr, roc_auc, epoch, base_logdir=None, tag=None):
