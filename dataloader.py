@@ -11,7 +11,7 @@ import random
 
 
 class ConcatBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, dataset_sizes, shuffle=True):
+    def __init__(self, dataset, batch_size, shuffle=True):
         """
         Args:
             dataset (ConcatDataset): The concatenated dataset.
@@ -21,19 +21,18 @@ class ConcatBatchSampler(Sampler):
         """
         self.dataset = dataset
         self.batch_size = batch_size
-        self.dataset_sizes = dataset_sizes
         self.shuffle = shuffle
 
         # Create lists of indices for each dataset
-        self.indices_a = list(range(self.dataset_sizes[0]))  # Indices for Dataset A
-        self.indices_b = list(range(self.dataset_sizes[0], sum(self.dataset_sizes)))  # Indices for Dataset B
+        self.indices_a = list(range(self.dataset.cumulative_sizes[0]))  # Indices for Dataset A
+        self.indices_b = list(range(self.dataset.cumulative_sizes[0], self.dataset.cumulative_sizes[1]))  # Indices for Dataset B
 
     def __iter__(self):
         # Optionally shuffle the indices within each dataset
         if self.shuffle:
             torch.manual_seed(torch.initial_seed())
-            self.indices_a = torch.randperm(self.dataset_sizes[0]).tolist()
-            self.indices_b = torch.randperm(self.dataset_sizes[1]).add(self.dataset_sizes[0]).tolist()
+            self.indices_a = torch.randperm(self.dataset.cumulative_sizes[0]).tolist()
+            self.indices_b = torch.randperm(len(self.dataset.datasets[1])).add(self.dataset.cumulative_sizes[0]).tolist()
 
         # Split indices into batches for Dataset A and Dataset B
         batches_a = [self.indices_a[i:i + self.batch_size] for i in range(0, len(self.indices_a), self.batch_size)]
@@ -52,7 +51,7 @@ class ConcatBatchSampler(Sampler):
             _a_batches = batches_a[:na]
             _b_batches = batches_b[:nb]
             combined_batches.extend(_a_batches)
-            combined_batches.append(_b_batches)
+            combined_batches.extend(_b_batches)
             batches_a = batches_a[na:]
             batches_b = batches_b[nb:]
 
@@ -67,8 +66,8 @@ class ConcatBatchSampler(Sampler):
 
     def __len__(self):
         # Total number of batches, considering both datasets
-        num_batches_a = len(self.indices_a) // self.batch_size
-        num_batches_b = len(self.indices_b) // self.batch_size
+        num_batches_a = int(np.ceil(len(self.indices_a) / self.batch_size))
+        num_batches_b = int(np.ceil(len(self.indices_b) / self.batch_size))
         return num_batches_a + num_batches_b
 
 
@@ -128,10 +127,10 @@ class MyDataset(Dataset):
             toa = [toa[0] / self.fps_step]
 
         if self.toTensor:
-            features = torch.Tensor(features).to(self.device)  # 50 x 20 x 4096
-            detection = torch.Tensor(detection).to(self.device)
-            toa = torch.Tensor(toa).to(self.device)
-            flow = torch.Tensor(flow).to(self.device)
+            features = torch.Tensor(features)  # 50 x 20 x 4096
+            detection = torch.Tensor(detection)
+            toa = torch.Tensor(toa)
+            flow = torch.Tensor(flow)
 
         return features, detection, toa, flow
 

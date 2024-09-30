@@ -133,7 +133,7 @@ class SpatialAttention(nn.Module):
 
 
 class RiskyObject(nn.Module):
-    def __init__(self, x_dim, h_dim, n_frames=100, fps=20.0):
+    def __init__(self, x_dim, h_dim, n_frames=100, fps=20.0, class_weights=None):
         super(RiskyObject, self).__init__()
 
         self.x_dim = x_dim
@@ -147,7 +147,8 @@ class RiskyObject(nn.Module):
         self.n_layers_cor = 1
         self.h_dim_cor = 32
         self.gru_net = GRUNet(h_dim+h_dim, h_dim, 2, self.n_layers, self.h_dim_cor)
-        self.weight = torch.Tensor([0.25, 1]).cuda()  # TO-DO: find the correct weight
+        if class_weights is None: class_weights = [1., 1.]
+        self.weight = torch.Tensor(class_weights) #.cuda()  # TO-DO: find the correct weight
 
         # input dim 4
         self.gru_net_cor = CorGRU(4, self.h_dim_cor, self.n_layers_cor)
@@ -163,7 +164,7 @@ class RiskyObject(nn.Module):
         :param flow (batchsize, nFrames, 1+maxBox, Xdim) (Flow appearance feats)
         :batchsize = 1, currently we support batchsize=1
         """
-        losses = {'cross_entropy': 0}
+        losses = {'cross_entropy': 0, 'ce_list': []}
         h = Variable(torch.zeros(self.n_layers, x.size(0),  self.h_dim)
                      )  # TO-DO: hidden_in like dsta
         h = h.to(x.device)
@@ -226,11 +227,12 @@ class RiskyObject(nn.Module):
 
                         output, h_out = self.gru_net(x_obj, h_in, output_cor)  # 1x1x256
                         target = y[0][t][bbox][5].to(torch.long)
-                        target = torch.as_tensor([target], device=torch.device('cuda'))
+                        target = torch.as_tensor([target], device=x.device)
 
                         # compute error per object
                         loss = self.ce_loss(output, target)
                         losses['cross_entropy'] += loss
+                        losses['ce_list'].append(loss.item())
                         frame_outputs.append(output.detach().cpu().numpy())
                         frame_labels.append(y[0][t][bbox][5].detach().cpu().numpy())
                         h_all_out[track_id] = h_out  # storing in a dictionary
@@ -264,9 +266,10 @@ class RiskyObject(nn.Module):
                         output, h_out = self.gru_net(
                             x_obj, h_in, output_cor)  # 1x1x256
                         target = y[0][t][bbox][5].to(torch.long)
-                        target = torch.as_tensor([target], device=torch.device('cuda'))
+                        target = torch.as_tensor([target], device=x.device)
                         loss = self.ce_loss(output, target)
                         losses['cross_entropy'] += loss
+                        losses['ce_list'].append(loss.item())
                         frame_outputs.append(output.detach().cpu().numpy())
                         frame_labels.append(y[0][t][bbox][5].detach().cpu().numpy())
                         h_all_out[track_id] = h_out  # storing in a dictionary

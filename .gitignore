@@ -6,11 +6,13 @@ feat_extract/feature/
 logs/
 archive/
 checkpoints/
+charts/
 checkpoints_till_22_jully/
 models/__pycache__/
 
 /__pycache__
 feat_extract/src/__pycache__
+.idea
 
 *.csv
 *.npy

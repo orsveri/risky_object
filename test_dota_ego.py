@@ -69,10 +69,10 @@ class DoTAEgoDataset(MyDataset):
             toa = [toa[0] / self.fps_step]
 
         if self.toTensor:
-            features = torch.Tensor(features).to(self.device)  # 50 x 20 x 4096
-            detection = torch.Tensor(detection).to(self.device)
-            toa = torch.Tensor(toa).to(self.device)
-            flow = torch.Tensor(flow).to(self.device)
+            features = torch.Tensor(features)  # 50 x 20 x 4096
+            detection = torch.Tensor(detection)
+            toa = torch.Tensor(toa)
+            flow = torch.Tensor(flow)
 
         return features, detection, toa, flow, (clip_class, clip_ego)
 
@@ -503,11 +503,11 @@ def test_eval():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature',  # '/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/'
+    parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/',
                         help='The relative path of dataset.')
     parser.add_argument('--d', type=int, default=None, help='Number of clips.')
-    parser.add_argument('--tfps', type=int, default=20, help='Target FPS. Default: 20')
-    parser.add_argument('--dfps', type=int, default=20, help='The FPS of data. Default: 20')
+    parser.add_argument('--tfps', type=int, default=10, help='Target FPS. Default: 20')
+    parser.add_argument('--dfps', type=int, default=10, help='The FPS of data. Default: 20')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 1')
     parser.add_argument('--threshold', type=float, default=0.8,
@@ -541,4 +541,15 @@ if __name__ == '__main__':
     else:
         train_eval()
 
-#--data_path /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --phase=train --batch_size=1 --output_dir=logs/rol_fps10_dota --dfps 20 --tfps 20 --ckpt_file logs/rol_fps10/ckpts/best_ap_12.pth
+# --phase=test --output_dir=logs/rol_fps20_dota --ckpt_file logs/rol_fps10/ckpts/best_ap_19.pth --epoch 19
+
+"""
+1   --phase=test --output_dir=logs/gta_rol_half --ckpt_file logs/gta_rol_half/ckpts/best_ap_26.pth --epoch 26
+2   --phase=test --output_dir=logs/rol_gta800 --ckpt_file logs/rol_gta800/ckpts/best_ap_27.pth --epoch 27
+(3) --phase=test --output_dir=logs/gta_rol_ALL --ckpt_file logs/gta_rol_ALL/ckpts/best_ap_10.pth --epoch 10
+(4) --phase=test --output_dir=logs/quartrol_gta --ckpt_file logs/quartrol_gta/ckpts/best_ap_13.pth --epoch 13
+5*  --phase=test --output_dir=logs/gta_gta_800 --ckpt_file logs/gta_gta_800/ckpts/best_ap_29.pth --epoch 29
+(6) --phase=test --output_dir=logs/gta_gta_ALL --ckpt_file logs/gta_gta_ALL/ckpts/best_ap_15.pth --epoch 15
+
+--phase=test --output_dir=logs/rol_fps10_dota_correct --ckpt_file logs/rol_fps10_dota_correct/ckpts/best_ap_25.pth --epoch 25
+"""

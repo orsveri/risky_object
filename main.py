@@ -6,6 +6,7 @@ from datetime import date
 import time
 
 import torch
+import multiprocessing
 from torch.ao.nn.quantized.functional import threshold
 from torch.utils.data import DataLoader
 from models.model import RiskyObject
@@ -22,19 +23,31 @@ import csv
 
 # optional
 
-seed = 123
-np.random.seed(seed)
-torch.manual_seed(seed)
+# seed = 123
+# np.random.seed(seed)
+# torch.manual_seed(seed)
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
+def get_class_weights(data_dir):
+    if "Updated_feature" in data_dir:
+        class_weights = [0.25, 1.]
+    elif "AMNet_DoTA" in data_dir:
+        class_weights = [0.16, 1.]
+    elif "GTACrash/AMNet_feats" in data_dir:
+        class_weights = [0.21, 1.]
+    else:
+        raise NotImplementedError(f"Unknown class weights for this dataset! {data_dir}")
+    return class_weights
 
-def write_scalars(logger, epoch, losses, lr):
+
+def write_scalars(logger, epoch, losses, lr, obj_losses):
     # fetch results
     cross_entropy = losses['cross_entropy'].mean()
     # write to tensorboardX
     logger.add_scalar('train/loss', cross_entropy, epoch)
+    logger.add_scalar('train/mean_loss', obj_losses, epoch)
     logger.add_scalar("train/lr", lr, epoch)
 
 
@@ -83,7 +96,7 @@ def write_weight_histograms(logger, model, epoch):
     logger.add_histogram('histogram/gru.dense2.bias', model.gru_net.dense2.bias, epoch)
 
 
-def test_all(testdata_loader, model):
+def test_all(testdata_loader, model, device):
     # Hre we know that the batch size is 0 and we do not have batch dimension in the model's outputs
     all_pred = []
     all_labels = []
@@ -94,33 +107,44 @@ def test_all(testdata_loader, model):
 
     with torch.no_grad():
         for batch_xs, batch_det, batch_toas, batch_flow in tqdm(testdata_loader):
-            losses, all_outputs, labels = model(batch_xs, batch_det, batch_toas, batch_flow)
+            batch_xs = batch_xs.to(device, non_blocking=True)
+            batch_det = batch_det.to(device, non_blocking=True)
+            batch_toas = batch_toas.to(device, non_blocking=True)
+            batch_flow = batch_flow.to(device, non_blocking=True)
             all_toa.extend(batch_toas.cpu().detach()[:, 0].tolist())
 
-            frame_preds = []
-            frame_labels = []
-            obj_labels = []
+            for ib in range(batch_xs.shape[0]):
+                batch_xs_ = torch.unsqueeze(batch_xs[ib], dim=0)
+                batch_det_ = torch.unsqueeze(batch_det[ib], dim=0)
+                batch_toas_ = None  # torch.unsqueeze(batch_toas[ib], dim=0)
+                batch_flow_ = torch.unsqueeze(batch_flow[ib], dim=0)
 
-            losses_all.append(losses)
-            T = len(all_outputs)
-            for t in range(T):
-                frame = all_outputs[t]
-                if len(frame) == 0:
-                    frame_preds.append(0)
-                    frame_labels.append(0)
-                    continue
-                else:
-                    frame_scores = []
-                    for j in range(len(frame)):
-                        score = np.exp(frame[j][:, 1])/np.sum(np.exp(frame[j]), axis=1)[0]
-                        all_pred.append(score)
-                        frame_scores.append(score)
-                        obj_labels.append(int(labels[t][j]+0))  # added zero to convert array to scalar
-                    frame_preds.append(max(frame_scores)[0])
-                    frame_labels.append(max(obj_labels))
-            all_frame_pred.append(np.array(frame_preds, dtype=float))
-            all_frame_labels.append(np.array(frame_labels, dtype=float))
-            all_labels.append(obj_labels)
+                losses, all_outputs, labels = model(batch_xs_, batch_det_, batch_toas_, batch_flow_)
+
+                frame_preds = []
+                frame_labels = []
+                obj_labels = []
+
+                losses_all.append(losses)
+                T = len(all_outputs)
+                for t in range(T):
+                    frame = all_outputs[t]
+                    if len(frame) == 0:
+                        frame_preds.append(0)
+                        frame_labels.append(0)
+                        continue
+                    else:
+                        frame_scores = []
+                        for j in range(len(frame)):
+                            score = np.exp(frame[j][:, 1])/np.sum(np.exp(frame[j]), axis=1)[0]
+                            all_pred.append(score)
+                            frame_scores.append(score)
+                            obj_labels.append(int(labels[t][j]+0))  # added zero to convert array to scalar
+                        frame_preds.append(max(frame_scores)[0])
+                        frame_labels.append(max(obj_labels))
+                all_frame_pred.append(np.array(frame_preds, dtype=float))
+                all_frame_labels.append(np.array(frame_labels, dtype=float))
+                all_labels.append(obj_labels)
     #all_frame_pred = np.array(all_frame_pred) changing seq length
     # all_pred = np.array([all_pred[i][0] for i in range(len(all_pred))])
     return losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels
@@ -152,20 +176,19 @@ def sanity_check():
 
     print("Creating datasets...")
 
-    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=20, target_fps=20, n_clips=p.d)
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=20, target_fps=20)
+    train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
+    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
 
     traindata_loader = DataLoader(
-        dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True)
+        dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=False, num_workers = 2, pin_memory=True)
     testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
-                                 shuffle=False, drop_last=True)
+                                 shuffle=False, drop_last=False, num_workers = 2, pin_memory=True)
     batch_xs, batch_det, batch_toas, batch_flow = next(iter(traindata_loader))
     n_frames = 100
-    fps = 20
 
     print("Datasets and dataloader created")
 
-    model = RiskyObject(p.x_dim, p.h_dim, n_frames, fps)
+    model = RiskyObject(p.x_dim, p.h_dim, n_frames, p.tfps)
     # pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # print('pytorch_total_params : ', pytorch_total_params)
     # sys.exit()
@@ -196,7 +219,6 @@ def sanity_check():
 
 
 def train_eval():
-
     # data_path = os.path.join(ROOT_PATH, p.data_path, p.dataset)
     data_path = p.data_path
     model_dir = os.path.join(p.output_dir, 'ckpts')
@@ -222,19 +244,21 @@ def train_eval():
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     train_data = MyDataset(data_path, 'train', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps)
+    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)
 
     traindata_loader = DataLoader(
-        dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=True
+        dataset=train_data, batch_size=p.batch_size, shuffle=True, drop_last=False,
+        num_workers = 2, pin_memory=True
     )
     testdata_loader = DataLoader(
-        dataset=test_data, batch_size=p.batch_size, shuffle=False, drop_last=True
+        dataset=test_data, batch_size=p.batch_size, shuffle=False, drop_last=False,
+        num_workers = 2, pin_memory=True
     )
 
     n_frames = 100
-    fps = p.tfps
     model_file = p.ckpt_file
-    model = RiskyObject(p.x_dim, p.h_dim, n_frames, fps)
+    class_weights = get_class_weights(data_path)
+    model = RiskyObject(p.x_dim, p.h_dim, n_frames, p.tfps, class_weights=class_weights)
 
     result_csv = os.path.join(result_dir, f'result_{date_saved}_{current_time}.csv')
     with open(result_csv, 'a', newline='') as f:
@@ -243,7 +267,7 @@ def train_eval():
         writer.writerow(
             [f"x_dim: {model.x_dim}, base_h_dim: {model.h_dim}, base_n_layers: {model.n_layers}, "
              f"cor_n_layers: {model.n_layers_cor}, h_dim_cor:{model.h_dim_cor}, weight: {model.weight}, "
-             f"dfps: {p.dfps}, tfps: {p.tfps}"])
+             f"dfps: {p.dfps}, tfps: {p.tfps}, seed: {p.seed}, batch_size: {p.batch_size}, ckpt: {p.ckpt_file}"])
         writer.writerow(['epoch', 'loss_val', 'mTTA', 'TTA_RT', 'P_RT', 'threshold', 'roc_auc', 'ap'])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=p.base_lr)
@@ -291,42 +315,56 @@ def train_eval():
     #         print(name)
 
     for k in range(p.epoch):
+        epoch_losses = []
         L_data = len(traindata_loader)
         loop = tqdm(enumerate(traindata_loader), total=L_data)
         if k <= start_epoch:
             iter_cur += len(traindata_loader)
             continue
         for i, (batch_xs, batch_det, batch_toas, batch_flow) in loop:
-            optimizer.zero_grad()
+            batch_xs = batch_xs.to(device, non_blocking=True)
+            batch_det = batch_det.to(device, non_blocking=True)
+            batch_toas = batch_toas.to(device, non_blocking=True)
+            batch_flow = batch_flow.to(device, non_blocking=True)
 
-            losses, all_outputs, all_labels = model(batch_xs, batch_det, batch_toas, batch_flow)
+            for ib in range(batch_xs.shape[0]):
+                batch_xs_ = torch.unsqueeze(batch_xs[ib], dim=0)
+                batch_det_ = torch.unsqueeze(batch_det[ib], dim=0)
+                batch_toas_ = torch.unsqueeze(batch_toas[ib], dim=0)
+                batch_flow_ = torch.unsqueeze(batch_flow[ib], dim=0)
 
-            # backward
-            losses['cross_entropy'].mean().backward()
-            # clip gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 10)  # not sure
-            optimizer.step()
-            loop.set_description(f"Epoch  [{k}/{p.epoch}]")
-            loop.set_postfix(loss=losses['cross_entropy'].item())
+                optimizer.zero_grad()
 
-            # -----------------
-            # write scalars
-            # To-DO:
-            lr = optimizer.param_groups[0]['lr']
-            write_scalars(logger, k, losses, lr)
-            # Log gradients
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    logger.add_histogram(f'{name}.grad', param.grad, k * L_data + i)  # Log the gradient histogram
+                losses, all_outputs, all_labels = model(batch_xs_, batch_det_, batch_toas_, batch_flow_)
 
-            # ---------------
-            iter_cur = 0
+                losses_ = np.mean(np.array(losses['ce_list']))
+
+                # backward
+                losses['cross_entropy'].mean().backward()
+                # clip gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 10)  # not sure
+                optimizer.step()
+                loop.set_description(f"Epoch  [{k}/{p.epoch}]")
+                loop.set_postfix(loss=losses['cross_entropy'].item())
+
+                # -----------------
+                # write scalars
+                # To-DO:
+                lr = optimizer.param_groups[0]['lr']
+                write_scalars(logger, k, losses, lr, losses_)
+                # Log gradients
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        logger.add_histogram(f'{name}.grad', param.grad, k * L_data + i*p.batch_size+ib)  # Log the gradient histogram
+
+                # ---------------
+                iter_cur = 0
 
         # if k % p.test_iter == 0 and k != 0:
         print('----------------------------------')
         print("Starting evaluation...")
         model.eval()
-        losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = test_all(testdata_loader, model)
+        losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = test_all(testdata_loader, model, device)
 
         loss_val = average_losses(losses_all)
         fpr, tpr, roc_auc, tta, frame_results = evaluation(
@@ -354,32 +392,40 @@ def train_eval():
         write_pr_curve_tensorboard(logger, all_pred, all_labels_flat)
 
         # # save model
-        auc_max_list_ = auc_max_list + [roc_auc]
-        del_k = np.argmin(auc_max_list_)
-        if del_k != 3:
-            del_path = os.path.join(model_dir, f'best_auc_{auc_max_k[del_k]}.pth')
-            if os.path.exists(del_path):
-                os.remove(del_path)
-            model_file = os.path.join(model_dir, f'best_auc_{k}.pth')
+        save_only_best = False
+        if save_only_best:
+            auc_max_list_ = auc_max_list + [roc_auc]
+            del_k = np.argmin(auc_max_list_)
+            if del_k != 3:
+                del_path = os.path.join(model_dir, f'best_auc_{auc_max_k[del_k]}.pth')
+                if os.path.exists(del_path):
+                    os.remove(del_path)
+                model_file = os.path.join(model_dir, f'best_auc_{k}.pth')
+                torch.save({'epoch': k,
+                            'model': model.state_dict(),
+                            'optimizer': optimizer.state_dict()}, model_file)
+                auc_max_list[del_k] = roc_auc
+                auc_max_k[del_k] = k
+                print(f'Best AUC Model has been saved as: {model_file}. (del {auc_max_k[del_k]}, auc_list {auc_max_list})')
+            ap_max_list_ = ap_max_list + [ap]
+            del_k = np.argmin(ap_max_list_)
+            if del_k != 3:
+                del_path = os.path.join(model_dir, f'best_ap_{ap_max_k[del_k]}.pth')
+                if os.path.exists(del_path):
+                    os.remove(del_path)
+                model_file = os.path.join(model_dir, f'best_ap_{k}.pth')
+                torch.save({'epoch': k,
+                            'model': model.state_dict(),
+                            'optimizer': optimizer.state_dict()}, model_file)
+                ap_max_list[del_k] = ap
+                ap_max_k[del_k] = k
+                print(f'Best AP Model has been saved as: {model_file}. (del {ap_max_k[del_k]}, ap_list {ap_max_list})')
+        else:
+            model_file = os.path.join(model_dir, f'model_{k}.pth')
             torch.save({'epoch': k,
                         'model': model.state_dict(),
                         'optimizer': optimizer.state_dict()}, model_file)
-            auc_max_list[del_k] = roc_auc
-            auc_max_k[del_k] = k
-            print(f'Best AUC Model has been saved as: {model_file}. (del {auc_max_k[del_k]}, auc_list {auc_max_list})')
-        ap_max_list_ = ap_max_list + [ap]
-        del_k = np.argmin(ap_max_list_)
-        if del_k != 3:
-            del_path = os.path.join(model_dir, f'best_ap_{ap_max_k[del_k]}.pth')
-            if os.path.exists(del_path):
-                os.remove(del_path)
-            model_file = os.path.join(model_dir, f'best_ap_{k}.pth')
-            torch.save({'epoch': k,
-                        'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict()}, model_file)
-            ap_max_list[del_k] = ap
-            ap_max_k[del_k] = k
-            print(f'Best AP Model has been saved as: {model_file}. (del {ap_max_k[del_k]}, ap_list {ap_max_list})')
+            print(f'Model has been saved as: {model_file}.')
         ###########################################################################
         scheduler.step(losses['cross_entropy'])
         # write histograms
@@ -407,22 +453,21 @@ def test_eval():
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)  # val
-    # test_data = MyDataset(data_path, 'sidewipe', toTensor=True, device=device, data_fps=20, target_fps=20)  # val
+    # test_data = MyDataset(data_path, 'sidewipe', toTensor=True, device=device, data_fps=20, target_fps=20, n_clips=p.d)  # val
 
     testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
-                                 shuffle=False, drop_last=True)
+                                 shuffle=False, drop_last=False, num_workers = 2, pin_memory=True)
 
     n_frames = 100  # unnecessary
-    fps = p.tfps  # unnecessary
 
     model_file = p.ckpt_file  # directory of the model file
-    model = RiskyObject(p.x_dim, p.h_dim, n_frames, fps)
+    model = RiskyObject(p.x_dim, p.h_dim, n_frames, p.tfps)
     model = model.to(device=device)
     model.eval()
     model, _, _ = _load_checkpoint(model, filename=model_file)
     print('Checkpoints loaded successfully')
     print('Computing.........')
-    losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = test_all(testdata_loader, model)
+    losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = test_all(testdata_loader, model, device)
     loss_val = average_losses(losses_all)
     fpr, tpr, roc_auc, tta, frame_results = evaluation(
         all_pred, all_labels, p.epoch, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
@@ -440,6 +485,7 @@ def test_eval():
 
 
 if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', type=str, default='/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature',  # '/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/'
                         help='The relative path of dataset.')
@@ -448,6 +494,8 @@ if __name__ == '__main__':
     parser.add_argument('--dfps', type=int, default=20, help='The FPS of data. Default: 20')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 1')
+    parser.add_argument('--seed', type=int, default=123,
+                        help='The random seed. Default: 1')
     parser.add_argument('--threshold', type=float, default=0.8,
                         help='Recall threshold for Precision and TTA. Default: 0.8')
     parser.add_argument('--base_lr', type=float, default=1e-3,
@@ -472,6 +520,10 @@ if __name__ == '__main__':
                         help='If want transfer learning. Default: False')
 
     p = parser.parse_args()
+
+    np.random.seed(p.seed)
+    torch.manual_seed(p.seed)
+
     if p.phase == 'test':
         test_eval()
     elif p.phase == 'check':
@@ -479,4 +531,17 @@ if __name__ == '__main__':
     else:
         train_eval()
 
-#--data_path /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --phase=train --batch_size=1 --output_dir=logs/rol_fps10_dota --dfps 20 --tfps 20 --ckpt_file logs/rol_fps10/ckpts/best_ap_12.pth
+# --data_path /mnt/experiments/sorlova/datasets/Updated_feature/Updated_feature/ --phase=train --batch_size=1 --output_dir=logs/check2 --dfps 20 --tfps 20
+
+"""
+export CUDA_VISIBLE_DEVICES=1 && cd repos/TADTAA/risky_object/ && conda activate gg
+
+python main.py --data_path /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --phase=train --epoch 50 --dfps 20 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/only_rol/version_2 --seed 42 
+python main.py --data_path /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --phase=train --epoch 50 --dfps 20 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/only_rol/version_3 --seed 256
+
+python main.py --data_path /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --phase=train --epoch 40 --dfps 10 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/only_dota/version_2 --seed 42 
+python main.py --data_path /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --phase=train --epoch 40 --dfps 10 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/only_dota/version_3 --seed 256
+
+
+
+"""
