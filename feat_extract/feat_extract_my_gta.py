@@ -90,6 +90,8 @@ def main():
 
     clip_folders = natsorted(os.listdir(dataset_path))
     clip_folders = [os.path.join(dataset_path, cf) for cf in clip_folders if os.path.isdir(os.path.join(dataset_path, cf))]
+    # fixed
+    clip_folders = natsorted([cf for cf in clip_folders if os.path.exists(os.path.join(cf, "fixed_dets.csv"))])
 
     if not args.stop:
         clip_folders = clip_folders[int(args.start):]
@@ -108,7 +110,11 @@ def main():
 
     for clip_folder in tqdm(clip_folders):
         # All files
-        dets = pd.read_csv(os.path.join(clip_folder, "detections.csv"))
+        fixed_det_path = os.path.join(clip_folder, "fixed_dets.csv")
+        # if not os.path.exists(fixed_det_path):
+        #     continue
+        dets = pd.read_csv(fixed_det_path)
+        # dets = pd.read_csv(os.path.join(clip_folder, "detections.csv"))
         rgb_zip = os.path.join(clip_folder, "rgb.zip")
         flow_zip = os.path.join(clip_folder, "flow.zip")
         out_file = os.path.join(clip_folder, f"{os.path.basename(clip_folder)}.npz")
@@ -213,7 +219,7 @@ if __name__ == '__main__':
     main()
 
 # --path /mnt/experiments/sorlova/datasets/GTACrash/dataset --start 0 --stop -1
-# export CUDA_VISIBLE_DEVICES=2 && cd repos/TADTAA/risky_object/feat_extract/ && conda activate gg
+# export CUDA_VISIBLE_DEVICES=1 && cd repos/TADTAA/risky_object/feat_extract/ && conda activate gg
 # python feat_extract_my_gta.py --path /mnt/experiments/sorlova/datasets/GTACrash/dataset --start 0 --stop 1500
 
 

@@ -54,9 +54,9 @@ def show_boxes(img_dir, anno_file, out_dir):
                 cv2.imwrite(os.path.join(out_path), img)
 
 
-img_dir = "/mnt/experiments/sorlova/datasets/GTACrash/dataset/000140/rgb.zip"
-anno_file = "/mnt/experiments/sorlova/datasets/GTACrash/AMNet_feats/train/000140.npz"
-out_dir = "gta/000140"
+img_dir = "/mnt/experiments/sorlova/datasets/GTACrash/dataset/000000/rgb.zip"
+anno_file = "/mnt/experiments/sorlova/datasets/GTACrash/AMNet_feats/train/000000.npz"
+out_dir = "feat_extract/gta_example/000000"
 
 show_boxes(
     img_dir=img_dir,

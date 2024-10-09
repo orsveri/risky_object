@@ -35,8 +35,8 @@ def get_class_weights(data_dir):
         class_weights = [0.25, 1.]
     elif "AMNet_DoTA" in data_dir:
         class_weights = [0.16, 1.]
-    elif "GTACrash/AMNet_feats" in data_dir:
-        class_weights = [0.21, 1.]
+    elif "GTACrash/AMNet_GTA" in data_dir:
+        class_weights = [0.196, 1.]
     else:
         raise NotImplementedError(f"Unknown class weights for this dataset! {data_dir}")
     return class_weights

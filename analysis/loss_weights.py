@@ -30,19 +30,19 @@ def dataset_stats(dir, file_list):
 
 
 
-dir = "/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/train"
-dataset_stats(
-    dir=dir,
-    file_list=[f for f in os.listdir(dir) if f.endswith('.npz')]
-)
+# dir = "/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/train"
+# dataset_stats(
+#     dir=dir,
+#     file_list=[f for f in os.listdir(dir) if f.endswith('.npz')]
+# )
+#
+# dir = "/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/train"
+# dataset_stats(
+#     dir=dir,
+#     file_list=[f for f in os.listdir(dir) if f.endswith('.npz')]
+# )
 
-dir = "/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/train"
-dataset_stats(
-    dir=dir,
-    file_list=[f for f in os.listdir(dir) if f.endswith('.npz')]
-)
-
-dir = "/mnt/experiments/sorlova/datasets/GTACrash/AMNet_feats/train"
+dir = "/mnt/experiments/sorlova/datasets/GTACrash/AMNet_GTA/train"
 dataset_stats(
     dir=dir,
     file_list=[f for f in os.listdir(dir) if f.endswith('.npz')]

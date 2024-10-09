@@ -72,7 +72,7 @@ class ConcatBatchSampler(Sampler):
 
 
 class MyDataset(Dataset):
-    def __init__(self, data_path, phase, data_fps, target_fps, toTensor=False,  device=torch.device('cuda'), n_clips=None):
+    def __init__(self, data_path, phase, data_fps, target_fps, toTensor=False,  device=torch.device('cuda'), n_clips=None, required_T=None):
         self.data_path = data_path
         self.phase = phase
         self.toTensor = toTensor
@@ -88,9 +88,10 @@ class MyDataset(Dataset):
         self.files_list = self.get_filelist(filepath)
         self.n_clips = n_clips
         if n_clips is not None:
-            random.seed = 42
+            random.seed = torch.seed()
             random.shuffle(self.files_list)
             self.files_list = self.files_list[:n_clips]
+        self.required_T = required_T
         print(f"Dataset for {phase} initialized!")
         # print(self.files_list)
 
@@ -125,6 +126,14 @@ class MyDataset(Dataset):
             detection = detection[start::self.fps_step]
             flow = flow[start::self.fps_step]
             toa = [toa[0] / self.fps_step]
+
+        if self.required_T is not None:
+            if features.shape[0] < self.required_T:
+                features = np.pad(features, pad_width=((self.required_T - features.shape[0], 0), (0, 0), (0, 0)), mode='constant', constant_values=0)
+            if detection.shape[0] < self.required_T:
+                detection = np.pad(detection, pad_width=((self.required_T - detection.shape[0], 0), (0, 0), (0, 0)), mode='constant', constant_values=0)
+            if flow.shape[0] < self.required_T:
+                flow = np.pad(flow, pad_width=((self.required_T - flow.shape[0], 0), (0, 0), (0, 0)), mode='constant', constant_values=0)
 
         if self.toTensor:
             features = torch.Tensor(features)  # 50 x 20 x 4096

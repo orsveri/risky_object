@@ -36,8 +36,8 @@ def get_class_weights(data_dir1, data_dir2):
         class_counts.append([282270, 69266])
     if "AMNet_DoTA" in data_dir1 or "AMNet_DoTA" in data_dir2:
         class_counts.append([133641, 21350])
-    if "GTACrash/AMNet_feats" in data_dir1 or "GTACrash/AMNet_feats" in data_dir2:
-        class_counts.append([593925, 122624])
+    if "GTACrash/AMNet_GTA" in data_dir1 or "GTACrash/AMNet_GTA" in data_dir2:
+        class_counts.append([451727, 88499])
     assert len(class_counts) == 2, f"Unknown class counts for this dataset! {data_dir1, data_dir2}"
     acc_counts = class_counts[0][1] + class_counts[1][1]
     noacc_counts = class_counts[0][0] + class_counts[1][0]
@@ -191,9 +191,9 @@ def train_eval():
 
     #
     train_data1 = MyDataset(p.data_path1, 'train', toTensor=True, device=device, data_fps=p.dfps1, target_fps=p.tfps,
-                            n_clips=p.d1)
+                            n_clips=p.d1, required_T=p.req_seq_len1)
     train_data2 = MyDataset(p.data_path2, 'train', toTensor=True, device=device, data_fps=p.dfps2, target_fps=p.tfps,
-                            n_clips=p.d2)
+                            n_clips=p.d2, required_T=p.req_seq_len2)
     train_data = ConcatDataset([train_data1, train_data2])
     test_data1 = MyDataset(p.data_path1, 'val', toTensor=True, device=device, data_fps=p.dfps1, target_fps=p.tfps, n_clips=p.d1)
     test_data2 = MyDataset(p.data_path2, 'val', toTensor=True, device=device, data_fps=p.dfps2, target_fps=p.tfps, n_clips=p.d2)
@@ -241,7 +241,7 @@ def train_eval():
     # TO-DO:
     # -----------------
     # write histograms
-    write_weight_histograms(logger, model, 0)
+    #write_weight_histograms(logger, model, 0)
 
     iter_cur = 0
     auc_max_list = [0, 0, 0]
@@ -306,9 +306,11 @@ def train_eval():
                 lr = optimizer.param_groups[0]['lr']
                 write_scalars(logger, k, losses, lr, losses_)
                 # Log gradients
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        logger.add_histogram(f'{name}.grad', param.grad, k * L_data + i*p.batch_size+ib)  # Log the gradient histogram
+                log_gradients = False  # 20-42 Mb per epoch
+                if log_gradients:
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            logger.add_histogram(f'{name}.grad', param.grad, k * L_data + i*p.batch_size+ib)  # Log the gradient histogram
 
                 # ---------------
                 iter_cur = 0
@@ -382,7 +384,7 @@ def train_eval():
         ###########################################################################
         scheduler.step(losses['cross_entropy'])
         # write histograms
-        write_weight_histograms(logger, model, k+1)
+        #write_weight_histograms(logger, model, k+1)
 
 
 def _load_checkpoint(model, optimizer=None, filename='checkpoint.pth.tar'):
@@ -416,6 +418,8 @@ if __name__ == '__main__':
     parser.add_argument('--tfps', type=int, default=20, help='Target FPS. Default: 20')
     parser.add_argument('--dfps1', type=int, default=20, help='The FPS of data. Default: 20')
     parser.add_argument('--dfps2', type=int, default=10, help='The FPS of data. Default: 20')
+    parser.add_argument('--req_seq_len1', type=int, default=None, help='Sequence (video) length')
+    parser.add_argument('--req_seq_len2', type=int, default=None, help='Sequence (video) length')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size in training process. Default: 1')
     parser.add_argument('--seed', type=int, default=123,
@@ -454,11 +458,11 @@ if __name__ == '__main__':
 # --data_path /mnt/experiments/sorlova/datasets/Updated_feature/Updated_feature/ --phase=train --batch_size=1 --output_dir=logs/check2 --dfps 20 --tfps 20
 
 """
-export CUDA_VISIBLE_DEVICES=3 && cd repos/TADTAA/risky_object/ && conda activate gg
+export CUDA_VISIBLE_DEVICES=0 && cd repos/TADTAA/risky_object/ && conda activate gg
 
-python main_mix.py --data_path1 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --dfps1 20 --data_path2 /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --dfps2 10 --phase=train --epoch 60 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/rol_dota/version_1 --seed 123
-python main_mix.py --data_path1 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --dfps1 20 --data_path2 /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --dfps2 10 --phase=train --epoch 60 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/rol_dota/version_2 --seed 42 
-python main_mix.py --data_path1 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --dfps1 20 --data_path2 /mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA/ --dfps2 10 --phase=train --epoch 60 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/rol_dota/version_3 --seed 256
+python main_mix.py --data_path1 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --dfps1 20 --data_path2 /mnt/experiments/sorlova/datasets/GTACrash/AMNet_GTA --dfps2 10 --req_seq_len2 19 --d2 2000 --phase=train --epoch 60 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/rol_gta_2000/version_1 --seed 123
+python main_mix.py --data_path1 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --dfps1 20 --data_path2 /mnt/experiments/sorlova/datasets/GTACrash/AMNet_GTA --dfps2 10 --req_seq_len2 19 --d2 2000 --phase=train --epoch 60 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/rol_gta_2000/version_2 --seed 42 
+python main_mix.py --data_path1 /mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature/ --dfps1 20 --data_path2 /mnt/experiments/sorlova/datasets/GTACrash/AMNet_GTA --dfps2 10 --req_seq_len2 19 --d2 2000 --phase=train --epoch 60 --tfps 10 --batch_size=32 --output_dir=logs/2_stage/rol_gta_2000/version_3 --seed 256
 
 
 """
