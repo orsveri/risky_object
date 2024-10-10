@@ -195,8 +195,10 @@ def train_eval():
     train_data2 = MyDataset(p.data_path2, 'train', toTensor=True, device=device, data_fps=p.dfps2, target_fps=p.tfps,
                             n_clips=p.d2, required_T=p.req_seq_len2)
     train_data = ConcatDataset([train_data1, train_data2])
-    test_data1 = MyDataset(p.data_path1, 'val', toTensor=True, device=device, data_fps=p.dfps1, target_fps=p.tfps, n_clips=p.d1)
-    test_data2 = MyDataset(p.data_path2, 'val', toTensor=True, device=device, data_fps=p.dfps2, target_fps=p.tfps, n_clips=p.d2)
+    test_data1 = MyDataset(p.data_path1, 'val', toTensor=True, device=device, data_fps=p.dfps1, target_fps=p.tfps,
+                           n_clips=p.d1, required_T=p.req_seq_len1)
+    test_data2 = MyDataset(p.data_path2, 'val', toTensor=True, device=device, data_fps=p.dfps2, target_fps=p.tfps,
+                           n_clips=p.d2, required_T=p.req_seq_len2)
     test_data = ConcatDataset([test_data1, test_data2])
     test_data = test_data
     #
