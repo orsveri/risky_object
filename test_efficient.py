@@ -2,9 +2,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from datetime import date
-import time
-
+from datetime import datetime
 import torch
 import multiprocessing
 from torch.ao.nn.quantized.functional import threshold
@@ -17,7 +15,9 @@ from tqdm import tqdm
 import os
 import shutil
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import average_precision_score
 import numpy as np
+import pandas as pd
 import csv
 
 
@@ -117,7 +117,7 @@ def test_one_sample_one_model(model, batch_xs_, batch_det_, batch_toas_, batch_f
     return losses, all_pred_, frame_preds, obj_labels, frame_labels
 
 
-def test_all(testdata_loader, models, device):
+def test_all(testdata_loader, models, streams, device):
     # Here we know that the batch size is 0 and we do not have batch dimension in the model's outputs
     all_pred = [[] for _ in models]
     all_labels = [[] for _ in models]
@@ -133,6 +133,7 @@ def test_all(testdata_loader, models, device):
             batch_toas = batch_toas.to(device, non_blocking=True)
             batch_flow = batch_flow.to(device, non_blocking=True)
             batch_toas = batch_toas.cpu().detach()[:, 0].tolist()
+            [all_toa[im].extend(batch_toas) for im, _ in enumerate(models)]  # !
 
             for ib in range(batch_xs.shape[0]):
                 batch_xs_ = torch.unsqueeze(batch_xs[ib], dim=0)
@@ -140,16 +141,19 @@ def test_all(testdata_loader, models, device):
                 batch_toas_ = None  # torch.unsqueeze(batch_toas[ib], dim=0)
                 batch_flow_ = torch.unsqueeze(batch_flow[ib], dim=0)
 
-                for im, model in enumerate(models):
-                    losses, all_pred_, frame_preds, obj_labels, frame_labels = test_one_sample_one_model(
-                        model, batch_xs_, batch_det_, batch_toas_, batch_flow_
-                    )
-                    losses_all[im].append(losses)
-                    all_pred[im].extend(all_pred_)
-                    all_frame_pred[im].append(np.array(frame_preds, dtype=float))
-                    all_frame_labels[im].append(np.array(frame_labels, dtype=float))
-                    all_labels[im].append(obj_labels)
-                    all_toa[im].extend(batch_toas)  # !
+                # Parallel inference
+                for im, (model, stream) in enumerate(zip(models, streams)):
+                    with torch.cuda.stream(stream):
+                        losses, all_pred_, frame_preds, obj_labels, frame_labels = test_one_sample_one_model(
+                            model, batch_xs_, batch_det_, batch_toas_, batch_flow_
+                        )
+                        losses_all[im].append(losses)
+                        all_pred[im].extend(all_pred_)
+                        all_frame_pred[im].append(np.array(frame_preds, dtype=float))
+                        all_frame_labels[im].append(np.array(frame_labels, dtype=float))
+                        all_labels[im].append(obj_labels)
+                # Sync point
+                stream.synchronize()
     # all_frame_pred = np.array(all_frame_pred) changing seq length
     # all_pred = np.array([all_pred[i][0] for i in range(len(all_pred))])
     return losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels
@@ -178,48 +182,77 @@ def _load_checkpoint(model, optimizer=None, filename='checkpoint.pth.tar'):
 
 
 def test_eval():
-    # data_path = os.path.join(ROOT_PATH, p.data_path, p.dataset)
-    data_path = dataset_paths[p.dataset]
+    ckpt_dir = os.path.join(p.log_dir, "ckpts")
+    assert os.path.exists(ckpt_dir)
+    assert p.ckpt_start is not None and p.ckpt_end is not None
+    epochs = list(range(p.ckpt_start, p.ckpt_end+1))
+    model_paths = sorted([p.ckpt_file.format(ep) for ep in range(p.ckpt_start, p.ckpt_end+1)])
+    assert all([os.path.exists(os.path.join(ckpt_dir, mp)) for mp in model_paths])
+    assert len(model_paths) < 70
+
+    result_dir = os.path.join(p.log_dir, "results", p.dataset)
+    os.makedirs(result_dir, exist_ok=True)
+    out_csv_path = os.path.join(result_dir, p.csv_file.format(p.dataset))
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
+    data_path = dataset_paths[p.dataset]
     test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d)  # val
-
     testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
                                  shuffle=False, drop_last=False, num_workers = 2, pin_memory=True)
-
     n_frames = 100  # unnecessary
 
     models = []
+    streams = []
 
     # ======= UPDATE HERE
-    model_file = p.ckpt_file  # directory of the model file
-    model = RiskyObject(p.x_dim, p.h_dim, n_frames, p.tfps)
-    model = model.to(device=device)
-    model.eval()
-    model, _, _ = _load_checkpoint(model, filename=model_file)
+    print("Loading models..")
+    for model_file in tqdm(model_paths):
+        model = RiskyObject(p.x_dim, p.h_dim, n_frames, p.tfps)
+        model = model.to(device=device)
+        model.eval()
+        model, _, _ = _load_checkpoint(model, filename=os.path.join(ckpt_dir, model_file))
+        models.append(model)
+        streams.append(torch.cuda.Stream())
     print('Checkpoints loaded successfully')
     # ======================
 
-    print('Computing.........')
-    losses_all_list, all_pred_list, all_labels_list, all_toa_list, all_frame_pred_list, all_frame_labels_list = test_all(testdata_loader, model, device)
+    print('Predicting.........')
 
-    for im, model in enumerate(models):
+    csv_data = []
+
+    losses_all_list, all_pred_list, all_labels_list, all_toa_list, all_frame_pred_list, all_frame_labels_list = test_all(
+        testdata_loader, models, streams, device)
+
+    for im, epoch in enumerate(epochs):
         losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = losses_all_list[im], all_pred_list[im], all_labels_list[im], all_toa_list[im], all_frame_pred_list[im], all_frame_labels_list[im]
         loss_val = average_losses(losses_all)
         fpr, tpr, roc_auc, tta, frame_results = evaluation(
-            all_pred, all_labels, p.epoch, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
+            all_pred, all_labels, None, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
             all_frame_labels=all_frame_labels
         )
-        plot_auc_curve(fpr, tpr, roc_auc, p.epoch, base_logdir=p.output_dir, tag="val")
-        ap = plot_pr_curve(all_labels, all_pred, p.epoch, base_logdir=p.output_dir, tag="val")
+        # SAVE results
+        all_labels_flat = []
+        for label in all_labels:
+            all_labels_flat.extend(label)
+        ap = average_precision_score(np.array(all_labels_flat), np.array(all_pred))
+        ap = plot_pr_curve(all_labels, all_pred, epoch, base_logdir=result_dir, tag=None)
+        plot_auc_curve(fpr, tpr, roc_auc, epoch, base_logdir=result_dir, tag=None)
+        # !!!ADD!!! results in a .csv
+        csv_data.append([epoch, ap, roc_auc, tta['mTTA'], datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
 
-        print('=====================')
-        print(f'model {im+1}, epoch: {None}')
-        print(f"AUC : {roc_auc:.4f}")
-        print(f"AP : {ap:.4f}")
-        print(tta)
-        print('=====================')
+    # Save new batch of metrics
+    csv_data = pd.DataFrame(csv_data, columns=["epoch", "AP", "AUC", "TTA", "timestamp"])
+    if os.path.exists(out_csv_path):
+        # If the file exists, append the new data
+        df_existing = pd.read_csv(out_csv_path, index_col=0)
+        df_final = pd.concat([df_existing, csv_data], ignore_index=True)
+    else:
+        # If the file doesn't exist, the combined data is just the new data
+        df_final = csv_data
+    # Save the updated DataFrame to CSV
+    df_final.reset_index(drop=True, inplace=True)
+    df_final.to_csv(out_csv_path, index=True, header=True)
 
     return
 
@@ -243,15 +276,23 @@ if __name__ == '__main__':
                         help='The batch size. Default: 1')
     parser.add_argument('--seed', type=int, default=123,
                         help='The random seed. Default: 123')
+    parser.add_argument('--ckpt_start', type=int, default=None,
+                        help='The random seed. Default: None')
+    parser.add_argument('--ckpt_end', type=int, default=None,
+                        help='The random seed. Default: None')
     parser.add_argument('--threshold', type=float, default=0.8,
                         help='Recall threshold for Precision and TTA. Default: 0.8')
     parser.add_argument('--h_dim', type=int, default=256,
                         help='hidden dimension of the gru. Default: 256')
     parser.add_argument('--x_dim', type=int, default=2048,
                         help='dimension of the resnet output. Default: 2048')
-    parser.add_argument('--output_dir', type=str, default='./checkpoints',
-                        help='The log dir')
-    parser.add_argument('--ckpt_file', type=str, default='',  # 'checkpoints/pretrained/best_auc.pth'
+    parser.add_argument('--log_dir', type=str, default=None,
+                        help='The training log dir')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='The result output dir')
+    parser.add_argument('--ckpt_file', type=str, default='model_{}.pth',
+                        help='model file')
+    parser.add_argument('--csv_file', type=str, default='test_{}.csv',
                         help='model file')
 
     p = parser.parse_args()
@@ -265,6 +306,6 @@ if __name__ == '__main__':
 """
 export CUDA_VISIBLE_DEVICES=1 && cd repos/TADTAA/risky_object/ && conda activate gg
 
-
+--dataset rol --dfps 20 --tfps 10 --output_dir test_rol --log_dir logs/2_stage/only_dota/version_2 --ckpt_start 0 --ckpt_end 3 
 
 """

@@ -135,7 +135,7 @@ def evaluation(all_pred, all_labels, epoch, fps, toa=None, all_frame_pred=None, 
 
 
 def plot_auc_curve(fpr, tpr, roc_auc, epoch, base_logdir=None, tag=None):
-    curve_dir = 'charts/' if tag is None else f"{tag}_charts"
+    curve_dir = 'auc_plots' if tag is None else f"{tag}_auc_plots"
     if base_logdir is not None:
         curve_dir = os.path.join(base_logdir, curve_dir)
     if not os.path.exists(curve_dir):
@@ -159,7 +159,7 @@ def plot_pr_curve(all_labels, all_pred, epoch, base_logdir=None, tag=None):
     for label in all_labels:
         all_labels_flat.extend(label)
 
-    pr_dir = 'charts/' if tag is None else f"{tag}_charts"
+    pr_dir = 'pr_plots' if tag is None else f"{tag}_pr_plots"
     if base_logdir is not None:
         pr_dir = os.path.join(base_logdir, pr_dir)
     if not os.path.exists(pr_dir):
