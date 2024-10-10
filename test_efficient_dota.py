@@ -13,6 +13,8 @@ from dataloader import MyDataset
 import argparse
 from tqdm import tqdm
 import os
+import json
+from natsort import natsorted
 import shutil
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import average_precision_score
@@ -23,6 +25,49 @@ import csv
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+
+class DoTAEgoDataset(MyDataset):
+    def __init__(self, dota_anno_file, **kwargs):
+        super().__init__(**kwargs)
+        with open(dota_anno_file, "r") as f:
+            anno = json.load(f)
+        self.classes = natsorted(list(set([v["anomaly_class"] for v in anno.values()])))
+        anno = {k: {"ego": v["anomaly_class"].startswith("ego:"), "class": self.classes.index(v["anomaly_class"])} for k, v in anno.items()}
+        self.dota_anno_file = anno
+
+    def __getitem__(self, index):
+        data_file = os.path.join(self.data_path, self.phase, self.files_list[index])
+        assert os.path.exists(data_file)
+        clip_name = os.path.splitext(os.path.basename(data_file))[0]
+        anno = self.dota_anno_file[clip_name]
+        clip_class = anno["class"]
+        clip_ego = anno["ego"]
+        try:
+            data = np.load(data_file)
+            features = data['feature']  # 100 x 31 x 2048
+            toa = [data['toa']+0]  # 1
+            detection = data['detection']  # labels : data['detection'][:,:,5] --> 100 x 30
+            flow = data['flow_feat']  # 100 x 31 x 2048
+            # track_id : data['detection'][:,:,0] --> 100 x 30
+        except:
+            raise IOError('Load data error! File: %s' % (data_file))
+
+        N = features.shape[0]
+        if self.fps_step != 1:
+            start = (N - 1) % self.fps_step
+            features = features[start::self.fps_step]
+            detection = detection[start::self.fps_step]
+            flow = flow[start::self.fps_step]
+            toa = [toa[0] / self.fps_step]
+
+        if self.toTensor:
+            features = torch.Tensor(features)  # 50 x 20 x 4096
+            detection = torch.Tensor(detection)
+            toa = torch.Tensor(toa)
+            flow = torch.Tensor(flow)
+
+        return features, detection, toa, flow, (clip_class, clip_ego)
+
 
 def get_class_weights(data_dir):
     if "Updated_feature" in data_dir:
@@ -119,23 +164,24 @@ def test_one_sample_one_model(model, batch_xs_, batch_det_, batch_toas_, batch_f
 
 def test_all(testdata_loader, models, streams, device):
     # Here we know that the batch size is 0 and we do not have batch dimension in the model's outputs
-    all_pred = [[] for _ in models]
-    all_labels = [[] for _ in models]
-    losses_all = [[] for _ in models]
-    all_toa = [[] for _ in models]
-    all_frame_pred = [[] for _ in models]
-    all_frame_labels = [[] for _ in models]
+    all_pred = [{"ego": [], "other": []} for _ in models]
+    all_labels = [{"ego": [], "other": []} for _ in models]
+    losses_all = [{"ego": [], "other": []} for _ in models]
+    all_toa = [{"ego": [], "other": []} for _ in models]
+    all_frame_pred = [{"ego": [], "other": []} for _ in models]
+    all_frame_labels = [{"ego": [], "other": []} for _ in models]
 
     with torch.no_grad():
-        for batch_xs, batch_det, batch_toas, batch_flow in tqdm(testdata_loader):
+        for batch_xs, batch_det, batch_toas, batch_flow, (clip_class, clip_ego) in tqdm(testdata_loader):
             batch_xs = batch_xs.to(device, non_blocking=True)
             batch_det = batch_det.to(device, non_blocking=True)
             batch_toas = batch_toas.to(device, non_blocking=True)
             batch_flow = batch_flow.to(device, non_blocking=True)
             batch_toas = batch_toas.cpu().detach()[:, 0].tolist()
-            [all_toa[im].extend(batch_toas) for im, _ in enumerate(models)]  # !
 
             for ib in range(batch_xs.shape[0]):
+                tag = "ego" if clip_ego[ib] else "other"
+                [all_toa[im][tag].append(batch_toas[ib]) for im, _ in enumerate(models)]
                 batch_xs_ = torch.unsqueeze(batch_xs[ib], dim=0)
                 batch_det_ = torch.unsqueeze(batch_det[ib], dim=0)
                 batch_toas_ = None  # torch.unsqueeze(batch_toas[ib], dim=0)
@@ -147,11 +193,11 @@ def test_all(testdata_loader, models, streams, device):
                         losses, all_pred_, frame_preds, obj_labels, frame_labels = test_one_sample_one_model(
                             model, batch_xs_, batch_det_, batch_toas_, batch_flow_
                         )
-                        losses_all[im].append(losses)
-                        all_pred[im].extend(all_pred_)
-                        all_frame_pred[im].append(np.array(frame_preds, dtype=float))
-                        all_frame_labels[im].append(np.array(frame_labels, dtype=float))
-                        all_labels[im].append(obj_labels)
+                        losses_all[im][tag].append(losses)
+                        all_pred[im][tag].extend(all_pred_)
+                        all_frame_pred[im][tag].append(np.array(frame_preds, dtype=float))
+                        all_frame_labels[im][tag].append(np.array(frame_labels, dtype=float))
+                        all_labels[im][tag].append(obj_labels)
                 # Sync point
                 stream.synchronize()
     # all_frame_pred = np.array(all_frame_pred) changing seq length
@@ -190,15 +236,20 @@ def test_eval():
     assert all([os.path.exists(os.path.join(ckpt_dir, mp)) for mp in model_paths])
     assert len(model_paths) < 70
 
-    result_dir = os.path.join(p.log_dir, "results", p.dataset)
+    result_dir = os.path.join(p.log_dir, "results", "dota")
     os.makedirs(result_dir, exist_ok=True)
-    out_csv_path = os.path.join(result_dir, p.csv_file.format(p.dataset))
+    out_csv_path_ = {
+        "ego": os.path.join(result_dir, p.csv_file.format("dota_ego")),
+        "other": os.path.join(result_dir, p.csv_file.format("dota_other"))
+    }
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    data_path = dataset_paths[p.dataset]
-    test_data = MyDataset(data_path, 'val', toTensor=True, device=device, data_fps=p.dfps, target_fps=p.tfps,
-                          n_clips=p.d, required_T=p.req_seq_len)  # val
+    data_path = dataset_paths["dota"]
+    test_data = DoTAEgoDataset(
+        dota_anno_file=os.path.join(data_path, "metadata_val.json"), data_path=data_path, phase='val', toTensor=True,
+        device=device, data_fps=p.dfps, target_fps=p.tfps, n_clips=p.d
+    )
     testdata_loader = DataLoader(dataset=test_data, batch_size=p.batch_size,
                                  shuffle=False, drop_last=False, num_workers = 2, pin_memory=True)
     n_frames = 100  # unnecessary
@@ -220,47 +271,56 @@ def test_eval():
 
     print('Predicting.........')
 
-    csv_data = []
+    csv_data = {"ego": [], "other": []}
 
     losses_all_list, all_pred_list, all_labels_list, all_toa_list, all_frame_pred_list, all_frame_labels_list = test_all(
         testdata_loader, models, streams, device)
 
     for im, epoch in enumerate(epochs):
-        losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = losses_all_list[im], all_pred_list[im], all_labels_list[im], all_toa_list[im], all_frame_pred_list[im], all_frame_labels_list[im]
-        loss_val = average_losses(losses_all)
-        fpr, tpr, roc_auc, tta, frame_results = evaluation(
-            all_pred, all_labels, None, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
-            all_frame_labels=all_frame_labels
-        )
-        # SAVE results
-        all_labels_flat = []
-        for label in all_labels:
-            all_labels_flat.extend(label)
-        ap = average_precision_score(np.array(all_labels_flat), np.array(all_pred))
-        ap = plot_pr_curve(all_labels, all_pred, epoch, base_logdir=result_dir, tag=None)
-        plot_auc_curve(fpr, tpr, roc_auc, epoch, base_logdir=result_dir, tag=None)
-        # !!!ADD!!! results in a .csv
-        csv_data.append([epoch, ap, roc_auc, tta['mTTA'], datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        for tag in ("ego", "other"):
+            losses_all, all_pred, all_labels, all_toa, all_frame_pred, all_frame_labels = losses_all_list[im][tag], all_pred_list[im][tag], all_labels_list[im][tag], all_toa_list[im][tag], all_frame_pred_list[im][tag], all_frame_labels_list[im][tag]
+            loss_val = average_losses(losses_all)
+            fpr, tpr, roc_auc_obj, tta, frame_results = evaluation(
+                all_pred, all_labels, None, fps=p.tfps, threshold=p.threshold, toa=all_toa, all_frame_pred=all_frame_pred,
+                all_frame_labels=all_frame_labels
+            )
+            #
+            all_labels_flat = []
+            for label in all_labels:
+                all_labels_flat.extend(label)
+            ap_obj = average_precision_score(np.array(all_labels_flat), np.array(all_pred))
+            ap_obj = plot_pr_curve(all_labels, all_pred, epoch, base_logdir=result_dir, tag=f"{tag}_obj")
+            plot_auc_curve(fpr, tpr, roc_auc_obj, epoch, base_logdir=result_dir, tag=f"{tag}_obj")
+            if frame_results is not None:
+                frame_fpr, frame_tpr, frame_roc_auc = frame_results
+                frame_ap = plot_pr_curve(all_frame_labels, np.concatenate(all_frame_pred, axis=None), epoch,
+                                         base_logdir=result_dir, tag=f"{tag}_frame")
+                plot_auc_curve(frame_fpr, frame_tpr, frame_roc_auc, epoch, base_logdir=result_dir,
+                               tag=f"{tag}_frame")
+            else:
+                frame_ap, frame_roc_auc = None, None
+            # !!!ADD!!! results in a .csv
+            csv_data[tag].append([epoch, frame_ap, frame_roc_auc, None if tta is None else tta['mTTA'], ap_obj, roc_auc_obj, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
 
     # Save new batch of metrics
-    csv_data = pd.DataFrame(csv_data, columns=["epoch", "AP", "AUC", "TTA", "timestamp"])
-    if os.path.exists(out_csv_path):
-        # If the file exists, append the new data
-        df_existing = pd.read_csv(out_csv_path, index_col=0)
-        df_final = pd.concat([df_existing, csv_data], ignore_index=True)
-    else:
-        # If the file doesn't exist, the combined data is just the new data
-        df_final = csv_data
-    # Save the updated DataFrame to CSV
-    df_final.reset_index(drop=True, inplace=True)
-    df_final.to_csv(out_csv_path, index=True, header=True)
+    for tag in ("ego", "other"):
+        out_csv_path = out_csv_path_[tag]
+        csv_data[tag] = pd.DataFrame(csv_data, columns=["epoch", "AP", "AUC", "TTA", "AP_obj", "AUC_obj", "timestamp"])
+        if os.path.exists(out_csv_path):
+            # If the file exists, append the new data
+            df_existing = pd.read_csv(out_csv_path, index_col=0)
+            df_final = pd.concat([df_existing, csv_data[tag]], ignore_index=True)
+        else:
+            # If the file doesn't exist, the combined data is just the new data
+            df_final = csv_data[tag]
+        # Save the updated DataFrame to CSV
+        df_final.reset_index(drop=True, inplace=True)
+        df_final.to_csv(out_csv_path, index=True, header=True)
 
     return
 
 
 dataset_paths = {
-    "rol": "/mnt/experiments/sorlova/datasets/ROL/Updated_feature/Updated_feature",
-    "gta": "/mnt/experiments/sorlova/datasets/GTACrash/AMNet_GTA",
     "dota": "/mnt/experiments/sorlova/datasets/ROL/AMNet_DoTA"
 }
 
@@ -268,12 +328,9 @@ dataset_paths = {
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='rol',
-                        help='The desired dataset.')
     parser.add_argument('--d', type=int, default=None, help='Number of clips.')
-    parser.add_argument('--tfps', type=int, default=20, help='Target FPS. Default: 20')
-    parser.add_argument('--dfps', type=int, default=20, help='The FPS of data. Default: 20')
-    parser.add_argument('--req_seq_len', type=int, default=None, help='Sequence (video) length')
+    parser.add_argument('--tfps', type=int, default=10, help='Target FPS. Default: 10')
+    parser.add_argument('--dfps', type=int, default=10, help='The FPS of data. Default: 10')
     parser.add_argument('--batch_size', type=int, default=1,
                         help='The batch size. Default: 1')
     parser.add_argument('--seed', type=int, default=123,
@@ -308,10 +365,10 @@ if __name__ == '__main__':
 """
 export CUDA_VISIBLE_DEVICES=3 && cd repos/TADTAA/risky_object/ && conda activate gg
 
---dataset gta --req_seq_len 19 --dfps 10 --tfps 10 --output_dir test_gta --log_dir logs/2_stage/only_dota/version_2 --ckpt_start 0 --ckpt_end 39 --batch_size 64
---dataset gta --req_seq_len 19 --dfps 10 --tfps 10 --output_dir test_gta --log_dir logs/2_stage/only_rol/version_2 --ckpt_start 0 --ckpt_end 49 --batch_size 64
---dataset gta --req_seq_len 19 --dfps 10 --tfps 10 --output_dir test_gta --log_dir logs/2_stage/rol_gta_800/version_2 --ckpt_start 0 --ckpt_end 24 --batch_size 64
---dataset gta --req_seq_len 19 --dfps 10 --tfps 10 --output_dir test_gta --log_dir logs/2_stage/rol_dota/version_2 --ckpt_start 0 --ckpt_end 34 --batch_size 64
+python test_efficient_dota.py --output_dir test_dota --log_dir logs/2_stage/only_dota/version_2 --ckpt_start 0 --ckpt_end 39 --batch_size 64
+python test_efficient_dota.py --output_dir test_dota --log_dir logs/2_stage/only_rol/version_2 --ckpt_start 0 --ckpt_end 49 --batch_size 64
+python test_efficient_dota.py --output_dir test_dota --log_dir logs/2_stage/rol_gta_800/version_2 --ckpt_start 0 --ckpt_end 37 --batch_size 64
+python test_efficient_dota.py --output_dir test_dota --log_dir logs/2_stage/rol_dota/version_2 --ckpt_start 0 --ckpt_end 34 --batch_size 64
 
 
 """
